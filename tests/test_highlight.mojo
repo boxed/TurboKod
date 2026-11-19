@@ -23,6 +23,7 @@ from turbokod.debugger_config import (
     built_in_debuggers, python_debugger_spec_for_venv,
 )
 from turbokod.highlight import (
+    HighlightList,
     GrammarRegistry, Highlight, HighlightCache,
     free_grammar_store, grammar_store_at, new_grammar_store,
     _apply_django_template_overlay, embedded_language_extensions,
@@ -856,6 +857,55 @@ def test_registries_sharing_a_store_compile_a_grammar_once() raises:
     free_grammar_store(store)
 
 
+def test_highlight_list_round_trips_and_splices() raises:
+    """The compact store gives back exactly the highlights put in, keeps
+    each distinct attribute once, and ``extend`` takes a row range from a
+    list with a different attribute table."""
+    var kw = highlight_keyword_attr()
+    var st = highlight_string_attr()
+    var cm = highlight_comment_attr()
+    var a = HighlightList()
+    a.append(Highlight(0, 0, 3, kw))
+    a.append(Highlight(0, 4, 9, st))
+    a.append(Highlight(2, 1, 70000, kw))
+    a.append(Highlight(5, 0, 2, st))
+    assert_equal(len(a), 4)
+    assert_equal(len(a.attrs), 2)
+    assert_equal(a[2].row, 2)
+    assert_equal(a[2].col_start, 1)
+    assert_equal(a[2].col_end, 70000)
+    assert_true(a[2].attr == kw)
+    assert_true(a[1].attr == st)
+    assert_equal(a.row(3), 5)
+    var plain = a.to_list()
+    assert_equal(len(plain), 4)
+    assert_true(HighlightList.from_list(plain).same_as(a))
+    assert_true(a.copy().same_as(a))
+    # ``b`` numbers its attributes differently: comment first, then keyword.
+    var b = HighlightList()
+    b.append(Highlight(1, 0, 1, cm))
+    b.append(Highlight(3, 0, 1, kw))
+    var out = HighlightList()
+    out.extend(a, 0, 2)
+    out.extend(b)
+    out.extend(a, 5)
+    assert_equal(len(out), 5)
+    assert_true(out[0].attr == kw and out[0].row == 0)
+    assert_true(out[1].attr == st and out[1].row == 0)
+    assert_true(out[2].attr == cm and out[2].row == 1)
+    assert_true(out[3].attr == kw and out[3].row == 3)
+    assert_true(out[4].attr == st and out[4].row == 5)
+    assert_false(out.same_as(a))
+    # Same positions, another attribute: not the same.
+    var c = a.copy()
+    c.clear()
+    c.append(Highlight(0, 0, 3, cm))
+    var d = HighlightList()
+    d.append(Highlight(0, 0, 3, kw))
+    assert_false(c.same_as(d))
+    assert_equal(len(c.attrs), 1)
+
+
 def test_sync_highlights_keeps_one_copy_of_the_buffers_highlights() raises:
     """An editor's highlight list doubles as the tokenizer's cached one
     (no second copy in the cache), and an edit still splices into it: the
@@ -868,7 +918,7 @@ def test_sync_highlights_keeps_one_copy_of_the_buffers_highlights() raises:
     lines.append(String("}"))
     var registry = GrammarRegistry()
     var cache = HighlightCache()
-    var hls = List[Highlight]()
+    var hls = HighlightList()
     sync_highlights(String("rs"), lines, 0, registry, cache, hls)
     assert_true(len(hls) > 0)
     assert_equal(len(cache.highlights), 0)
@@ -877,16 +927,16 @@ def test_sync_highlights_keeps_one_copy_of_the_buffers_highlights() raises:
     sync_highlights(String("rs"), lines, 2, registry, cache, hls)
     assert_equal(len(cache.highlights), 0)
     var full = _hl_set(highlight_for_extension(String("rs"), lines))
-    var got = _hl_set(hls)
+    var got = _hl_set(hls.to_list())
     assert_equal(len(got), len(full))
     for i in range(len(got)):
         assert_equal(got[i].row, full[i].row)
         assert_equal(got[i].col_start, full[i].col_start)
         assert_equal(got[i].col_end, full[i].col_end)
-    hls = List[Highlight]()
+    hls = HighlightList()
     lines[3] = String("} // end")
     sync_highlights(String("rs"), lines, 3, registry, cache, hls)
-    var got2 = _hl_set(hls)
+    var got2 = _hl_set(hls.to_list())
     var full2 = _hl_set(highlight_for_extension(String("rs"), lines))
     assert_equal(len(got2), len(full2))
     registry.release()
@@ -902,13 +952,13 @@ def test_sync_highlights_with_an_injection_keeps_the_grammar_output() raises:
     lines.append(String("x = \"<b>hi</b>\""))
     var registry = GrammarRegistry()
     var cache = HighlightCache()
-    var hls = List[Highlight]()
+    var hls = HighlightList()
     sync_highlights(String("py"), lines, 0, registry, cache, hls)
     assert_equal(cache.lent_len, -1)
     assert_true(len(cache.highlights) > 0)
     lines[0] = String("a = 12  # note")
     sync_highlights(String("py"), lines, 0, registry, cache, hls)
-    var got = _hl_set(hls)
+    var got = _hl_set(hls.to_list())
     var full = _hl_set(highlight_for_extension(String("py"), lines))
     assert_equal(len(got), len(full))
     for i in range(len(got)):
@@ -929,7 +979,7 @@ def test_sync_highlights_lends_when_a_marker_injects_nothing() raises:
     lines.append(String("b = 2"))
     var registry = GrammarRegistry()
     var cache = HighlightCache()
-    var hls = List[Highlight]()
+    var hls = HighlightList()
     sync_highlights(String("py"), lines, 0, registry, cache, hls)
     assert_true(len(hls) > 0)
     assert_equal(len(cache.highlights), 0)
@@ -937,7 +987,7 @@ def test_sync_highlights_lends_when_a_marker_injects_nothing() raises:
     lines[2] = String("b = 22  # note")
     sync_highlights(String("py"), lines, 2, registry, cache, hls)
     assert_equal(len(cache.highlights), 0)
-    var got = _hl_set(hls)
+    var got = _hl_set(hls.to_list())
     var full = _hl_set(highlight_for_extension(String("py"), lines))
     assert_equal(len(got), len(full))
     for i in range(len(got)):
@@ -1134,7 +1184,7 @@ def test_django_template_overlay_fills_embedded_tags() raises:
     lines.append(String("/* {# note #} */"))         # row 2: django comment
 
     # No pre-existing highlights cover the tags (CSS left them plain).
-    var hls = List[Highlight]()
+    var hls = HighlightList()
     _apply_django_template_overlay(String("django-html"), lines, hls)
 
     var saw_var = False
@@ -1164,13 +1214,13 @@ def test_django_template_overlay_fills_embedded_tags() raises:
     # alone — the overlay appends nothing, preserving the grammar's tint.
     var html_lines = List[String]()
     html_lines.append(String("<a>{{ x }}</a>"))      # ``{{`` at byte 3
-    var html_hls = List[Highlight]()
+    var html_hls = HighlightList()
     html_hls.append(Highlight(0, 3, 10, highlight_keyword_attr()))
     _apply_django_template_overlay(String("django-html"), html_lines, html_hls)
     assert_equal(len(html_hls), 1)
 
     # Non-django languages are a no-op (plain CSS keeps its ``{{`` plain).
-    var other = List[Highlight]()
+    var other = HighlightList()
     _apply_django_template_overlay(String("css"), lines, other)
     assert_equal(len(other), 0)
 
@@ -1196,7 +1246,7 @@ def test_textmate_capture_patterns_run_inside_group() raises:
     var g = load_grammar_from_string(grammar_json)
     var lines = List[String]()
     lines.append(String("\"a\\nb\""))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
     # Expect: outer string scope spans the whole match (col 0..6),
     # plus an escape-character highlight at col 2..4 for the ``\n``.
     var saw_outer_string = False
@@ -1251,7 +1301,7 @@ def test_textmate_comment_marker_and_covered_brackets() raises:
     var lines = List[String]()
     lines.append(String("if (x)"))
     lines.append(String("// hi"))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
 
     var op_attr = highlight_operator_attr()
     var comment_attr = highlight_comment_attr()
@@ -1297,7 +1347,7 @@ def test_textmate_while_rule_keeps_scope_open_per_line() raises:
     lines.append(String("> first quoted line"))
     lines.append(String("> second quoted line"))
     lines.append(String("not in quote"))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
     # Every quoted line should have the ``markup.quote`` scope painted
     # somewhere in its range. We map ``markup.*`` to the ident attr in
     # the bundled scope mapping (no specific markup mapping yet), but
@@ -1346,7 +1396,7 @@ def test_textmate_end_backreferences_begin_capture() raises:
     var lines = List[String]()
     lines.append(String("<div>WORD</div>"))
     lines.append(String("WORD"))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
     # Row 1's ``WORD`` is outside any tag, so it must highlight as a
     # keyword — which only happens if ``</div>`` closed the region on
     # row 0. (With the backref unresolved the region would still be
@@ -1366,7 +1416,7 @@ def test_textmate_end_backreferences_begin_capture() raises:
     var lines2 = List[String]()
     lines2.append(String("<div>WORD</span>"))
     lines2.append(String("WORD"))
-    var hls2 = tokenize_with_grammar(g, lines2)
+    var hls2 = tokenize_with_grammar(g, lines2).to_list()
     var saw_kw2_row1 = False
     for i in range(len(hls2)):
         var h = hls2[i]
@@ -1397,7 +1447,7 @@ def test_textmate_captures_overlay_on_match() raises:
     var g = load_grammar_from_string(grammar_json)
     var lines = List[String]()
     lines.append(String("fn hello"))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
     var keyword_at_0_2 = False
     var ident_at_3_8 = False
     for i in range(len(hls)):
@@ -1446,7 +1496,7 @@ def test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
     var lines = List[String]()
     lines.append(String("import Foo"))
     lines.append(String("let x"))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
     var saw_let_keyword = False
     for i in range(len(hls)):
         var h = hls[i]
@@ -1463,7 +1513,7 @@ def test_textmate_eol_closes_frame_with_newline_end_pattern() raises:
     lines2.append(String("import Foo"))
     lines2.append(String("    Bar"))
     lines2.append(String("let x"))
-    var hls2 = tokenize_with_grammar(g, lines2)
+    var hls2 = tokenize_with_grammar(g, lines2).to_list()
     var saw_let_kw_row2 = False
     for i in range(len(hls2)):
         var h = hls2[i]
@@ -2243,7 +2293,7 @@ def test_backreference_end_regexes_are_released_per_line() raises:
     var lines = List[String]()
     for i in range(40):
         lines.append(String("<div>row") + String(i) + String("</div>"))
-    var hls = tokenize_with_grammar(g, lines)
+    var hls = tokenize_with_grammar(g, lines).to_list()
     assert_true(len(hls) > 0)
     # One distinct substituted end regex per line, all handed back.
     assert_equal(onig_tracked_count(), live)

@@ -1,7 +1,7 @@
 """TextMate tokenizer driven by a loaded ``Grammar``.
 
 Walk one line at a time, maintaining a stack of open ``begin``/``end``
-scopes across lines. The output is the same ``List[Highlight]`` the
+scopes across lines. The output is a ``HighlightList``, the same data the
 existing pipeline already paints.
 
 Match-policy — simplified from the full TextMate spec to what the
@@ -32,7 +32,7 @@ from std.collections.optional import Optional
 
 from .colors import Attr
 from .highlight import (
-    Highlight,
+    Highlight, HighlightList,
     highlight_comment_attr, highlight_decorator_attr,
     highlight_ident_attr, highlight_keyword_attr,
     highlight_number_attr, highlight_operator_attr,
@@ -160,7 +160,7 @@ struct _Cand(ImplicitlyCopyable, Movable):
 
 def tokenize_with_grammar(
     grammar: Grammar, lines: List[String],
-) -> List[Highlight]:
+) -> HighlightList:
     """Run the tokenizer over an entire buffer. The scope stack is
     threaded line-to-line, which is what makes block comments and
     multi-line strings color correctly. Convenience wrapper around
@@ -175,7 +175,7 @@ def tokenize_with_grammar_full(
     grammar: Grammar, lines: List[String],
     mut table: StackTable, mut post_ids: List[Int],
     size_hint: Int = 0,
-) -> List[Highlight]:
+) -> HighlightList:
     """As ``tokenize_with_grammar``, but also fills ``post_ids`` with
     the scope stack at the *end* of each line, as an index into ``table``
     (which is reset). After the call, ``table.stacks[post_ids[i]]`` is the
@@ -186,7 +186,7 @@ def tokenize_with_grammar_full(
     ``size_hint`` is how many highlights to make room for up front."""
     post_ids.clear()
     table.stacks.clear()
-    var out = List[Highlight](capacity=size_hint)
+    var out = HighlightList(capacity=size_hint)
     var stack = List[Frame]()
     var last = -1
     for row in range(len(lines)):
@@ -206,7 +206,7 @@ def tokenize_lines_from(
     mut table: StackTable,
     mut post_ids: List[Int],
     mut stable_row: Int,
-) -> List[Highlight]:
+) -> HighlightList:
     """Tokenize ``lines[start_row:]`` starting from ``start_stack``.
 
     The early-exit lives inside this loop so we don't burn cycles
@@ -237,7 +237,7 @@ def tokenize_lines_from(
     ends up at ``len(lines)`` — i.e. nothing to splice.
     """
     post_ids.clear()
-    var out = List[Highlight]()
+    var out = HighlightList()
     var stack = copy_stack(start_stack)
     var row = start_row
     var last = -1
@@ -260,7 +260,7 @@ def tokenize_lines_from(
 
 def _tokenize_line(
     grammar: Grammar, line: String, next_line: String, row: Int,
-    mut stack: List[Frame], mut out: List[Highlight],
+    mut stack: List[Frame], mut out: HighlightList,
 ):
     """Tokenize one line, owning the line-local dynamic regexes.
 
@@ -286,7 +286,7 @@ def _tokenize_line(
 
 def _tokenize_line_scan(
     grammar: Grammar, line: String, next_line: String, row: Int,
-    mut stack: List[Frame], mut out: List[Highlight],
+    mut stack: List[Frame], mut out: HighlightList,
     mut dyn_keys: List[String], mut dyn_regexes: List[OnigRegex],
 ):
     var hb = line.as_bytes()
@@ -648,7 +648,7 @@ def _tokenize_line_scan(
 def _process_while_frames(
     grammar: Grammar, line: String, row: Int,
     mut stack: List[Frame], pos_in: Int,
-    mut out: List[Highlight],
+    mut out: HighlightList,
 ) -> Int:
     """Run the ``while``-rule check at the start of each line.
 
@@ -713,7 +713,7 @@ def _process_while_frames(
 def _emit_captures(
     grammar: Grammar, chain: String, match_name: String,
     caps: List[Capture], m: OnigMatch,
-    line: String, row: Int, mut out: List[Highlight],
+    line: String, row: Int, mut out: HighlightList,
 ):
     """Overlay capture-group highlights on top of a previously-emitted
     whole-match Highlight. Each capture is a (group_idx, scope,
@@ -765,7 +765,7 @@ def _emit_capture_subtokens(
     grammar: Grammar, line: String,
     sub_start: Int, sub_end: Int,
     chain: String, pattern_idxs: List[Int],
-    row: Int, mut out: List[Highlight],
+    row: Int, mut out: HighlightList,
 ):
     """Mini-tokenize the captured byte range ``[sub_start, sub_end)``
     of ``line`` against the listed patterns. Output column offsets
@@ -820,7 +820,7 @@ def _emit_capture_subtokens(
 
 def _emit_unmatched(
     grammar: Grammar, stack: List[Frame], line: String, row: Int,
-    start: Int, end: Int, mut out: List[Highlight],
+    start: Int, end: Int, mut out: HighlightList,
 ):
     """Color a span that no pattern matched. Inside an open scope
     we still want the surrounding ``contentName`` to paint —

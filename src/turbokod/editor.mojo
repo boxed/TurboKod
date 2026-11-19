@@ -52,7 +52,8 @@ from .git_changes import (
 )
 from .highlight import (
     CompletionRequest, DefinitionRequest, EditorContextMenuRequest,
-    GrammarRegistry, Highlight, HighlightCache, HoverRequest, extension_of,
+    GrammarRegistry, Highlight, HighlightCache, HighlightList, HoverRequest,
+    extension_of,
     highlight_comment_attr, highlight_string_attr,
     line_comment_for_extension, sync_highlights, word_at,
 )
@@ -1463,7 +1464,7 @@ struct Editor(Copyable, Movable):
     # opened, scope changed, etc.). 0 means "the whole buffer"
     # (the conservative default for operations that may have
     # touched any row, e.g. undo / redo / file load).
-    var highlights: List[Highlight]
+    var highlights: HighlightList
     var _highlights_dirty: Bool
     var _hl_dirty_row: Int
     # High-water mark companion to ``_hl_dirty_row``: the *highest*
@@ -2084,7 +2085,7 @@ struct Editor(Copyable, Movable):
         self.editorconfig = EditorConfig()
         self.default_trim_trailing_whitespace = -1
         self.default_insert_final_newline = -1
-        self.highlights = List[Highlight]()
+        self.highlights = HighlightList()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
         self._hl_dirty_max_row = -1
@@ -2320,7 +2321,7 @@ struct Editor(Copyable, Movable):
         # a 30 KB line through the TextMate/onig grammar took ~28 s. Leave
         # highlights empty (plain, uncolored text) so the file opens fast.
         if self._big_buffer:
-            self.highlights = List[Highlight]()
+            self.highlights = HighlightList()
             self._highlights_dirty = False
             self._hl_dirty_row = self.buffer.line_count()
             self._hl_dirty_max_row = -1
@@ -2355,7 +2356,7 @@ struct Editor(Copyable, Movable):
         var in_order = True
         var prev = 0
         for i in range(n):
-            var r = self.highlights[i].row
+            var r = self.highlights.row(i)
             if 0 <= r and r < n_rows:
                 start[r + 1] += 1
                 if r < prev:
@@ -2375,7 +2376,7 @@ struct Editor(Copyable, Movable):
             fill.append(start[r])
         var order = List[Int](length=start[n_rows], fill=0)
         for i in range(n):
-            var r = self.highlights[i].row
+            var r = self.highlights.row(i)
             if 0 <= r and r < n_rows:
                 order[fill[r]] = i
                 fill[r] += 1
@@ -6554,7 +6555,7 @@ struct Editor(Copyable, Movable):
         var c_attr = highlight_comment_attr()
         var span = self._hl_rows(row)
         for k in range(span[0], span[1]):
-            ref h = self.highlights[self._hl_at(k)]
+            var h = self.highlights[self._hl_at(k)]
             if h.row != row:
                 continue
             if not (h.col_start <= col and col < h.col_end):
@@ -6759,7 +6760,7 @@ struct Editor(Copyable, Movable):
                 if bidx >= 0 and bidx < len(hl_buckets):
                     ref bucket = hl_buckets[bidx]
                     for bi in range(len(bucket)):
-                        ref hl = self.highlights[bucket[bi]]
+                        var hl = self.highlights[bucket[bi]]
                         if hl.attr.fg == SYN_STRING \
                                 or hl.attr.fg == SYN_COMMENT:
                             sc_spans.append((hl.col_start, hl.col_end))
@@ -7342,7 +7343,7 @@ struct Editor(Copyable, Movable):
                         )
             else:
                 for h in range(len(self.highlights)):
-                    var r = self.highlights[h].row
+                    var r = self.highlights.row(h)
                     if r >= vis_lo and r <= vis_hi:
                         hl_buckets[r - vis_lo].append(h)
             for ch in range(len(self.color_highlights)):
@@ -7471,7 +7472,7 @@ struct Editor(Copyable, Movable):
             # the text pass above; we only adjust attributes here.
             ref row_bucket = hl_buckets[buf_row - vis_lo]
             for hb in range(len(row_bucket)):
-                ref hl = self.highlights[row_bucket[hb]]
+                var hl = self.highlights[row_bucket[hb]]
                 var hl_cells = _span_cells(
                     visible_cell_map, visible_cell_count, hl.col_start - start_byte, hl.col_end - start_byte,
                 )
@@ -7863,7 +7864,7 @@ struct Editor(Copyable, Movable):
                     var ncells = utf8_cell_map(line, cmap)
                     var hspan = self._hl_rows(brow)
                     for hk in range(hspan[0], hspan[1]):
-                        ref hl = self.highlights[self._hl_at(hk)]
+                        var hl = self.highlights[self._hl_at(hk)]
                         if hl.row != brow:
                             continue
                         _paint_attr_span(

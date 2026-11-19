@@ -57,6 +57,117 @@ struct Highlight(ImplicitlyCopyable, Movable):
     var attr: Attr
 
 
+@fieldwise_init
+struct _PackedHighlight(ImplicitlyCopyable, Movable):
+    """A ``Highlight`` in 16 bytes: 32-bit positions, and the attribute as
+    an index into its ``HighlightList``'s table."""
+    var row: Int32
+    var col_start: Int32
+    var col_end: Int32
+    var attr: Int32
+
+
+struct HighlightList(Copyable, Movable, Sized):
+    """A buffer's highlights, stored compactly: what the tokenizer writes,
+    the cache keeps and an ``Editor`` holds for as long as a file is open.
+
+    A ``Highlight`` is 40 bytes — three 64-bit positions and a 16-byte
+    ``Attr`` — and a source file has one for every dozen bytes of text, so
+    as a ``List[Highlight]`` an open file's highlights outweighed its text
+    three to one. Here each is 16: a file's highlights use a few dozen
+    distinct attributes at most, kept once in ``attrs``.
+
+    Reads like a list (``len``, ``hls[i]`` gives a ``Highlight``,
+    ``append``); ``to_list`` is for the callers that want the plain list —
+    one pass over a short text, not something kept."""
+    var items: List[_PackedHighlight]
+    var attrs: List[Attr]
+
+    def __init__(out self, *, capacity: Int = 0):
+        self.items = List[_PackedHighlight](capacity=capacity)
+        self.attrs = List[Attr]()
+
+    def __len__(self) -> Int:
+        return len(self.items)
+
+    def __getitem__(self, i: Int) -> Highlight:
+        var p = self.items[i]
+        return Highlight(
+            Int(p.row), Int(p.col_start), Int(p.col_end),
+            self.attrs[Int(p.attr)],
+        )
+
+    def row(self, i: Int) -> Int:
+        """``self[i].row`` without building the ``Highlight``, for the
+        passes over a whole file's."""
+        return Int(self.items[i].row)
+
+    def _attr_id(mut self, attr: Attr) -> Int32:
+        # Newest first: a run of tokens tends to repeat the last few.
+        var i = len(self.attrs) - 1
+        while i >= 0:
+            if self.attrs[i] == attr:
+                return Int32(i)
+            i -= 1
+        self.attrs.append(attr)
+        return Int32(len(self.attrs) - 1)
+
+    def append(mut self, h: Highlight):
+        var id = self._attr_id(h.attr)
+        self.items.append(_PackedHighlight(
+            Int32(h.row), Int32(h.col_start), Int32(h.col_end), id,
+        ))
+
+    def extend(
+        mut self, other: Self, lo_row: Int = 0, hi_row: Int = 1 << 62,
+    ):
+        """Append ``other``'s highlights on rows ``[lo_row, hi_row)``."""
+        var remap = List[Int32](capacity=len(other.attrs))
+        for i in range(len(other.attrs)):
+            remap.append(self._attr_id(other.attrs[i]))
+        for i in range(len(other.items)):
+            var p = other.items[i]
+            if Int(p.row) >= lo_row and Int(p.row) < hi_row:
+                self.items.append(_PackedHighlight(
+                    p.row, p.col_start, p.col_end, remap[Int(p.attr)],
+                ))
+
+    def clear(mut self):
+        self.items.clear()
+        self.attrs.clear()
+
+    def copy(self) -> Self:
+        var out = Self(capacity=len(self.items))
+        out.extend(self)
+        return out^
+
+    def to_list(self) -> List[Highlight]:
+        var out = List[Highlight](capacity=len(self.items))
+        for i in range(len(self.items)):
+            out.append(self[i])
+        return out^
+
+    @staticmethod
+    def from_list(hls: List[Highlight]) -> Self:
+        var out = Self(capacity=len(hls))
+        for i in range(len(hls)):
+            out.append(hls[i])
+        return out^
+
+    def same_as(self, other: Self) -> Bool:
+        """The same highlights in the same order."""
+        if len(self.items) != len(other.items):
+            return False
+        for i in range(len(self.items)):
+            var a = self.items[i]
+            var b = other.items[i]
+            if a.row != b.row or a.col_start != b.col_start \
+                    or a.col_end != b.col_end \
+                    or self.attrs[Int(a.attr)] != other.attrs[Int(b.attr)]:
+                return False
+        return True
+
+
 # Public colors. They render against the editor background (``EDITOR_BG``) and
 # use the reserved per-token slots, so the active theme controls every token
 # hue independently of the chrome palette. The default ("Turbo C++ 3.0") theme
@@ -450,7 +561,7 @@ struct HighlightCache(Copyable, Movable):
     is invalidated and the next refresh does a full retokenize.
     """
     var ext: String
-    var highlights: List[Highlight]
+    var highlights: HighlightList
     var lent_len: Int
     """``sync_highlights``: ``>= 0`` while the caller's list *is* the
     cached one (``highlights`` is then empty), holding its length."""
@@ -460,7 +571,7 @@ struct HighlightCache(Copyable, Movable):
 
     def __init__(out self):
         self.ext = String("")
-        self.highlights = List[Highlight]()
+        self.highlights = HighlightList()
         self.lent_len = -1
         self.post_stacks = List[Int]()
         self.stacks = StackTable()
@@ -469,7 +580,7 @@ struct HighlightCache(Copyable, Movable):
         """Drop the per-line state — used when the line count or
         extension shifts in a way the incremental path can't
         reconcile."""
-        self.highlights = List[Highlight]()
+        self.highlights = HighlightList()
         self.lent_len = -1
         self.post_stacks = List[Int]()
         self.stacks = StackTable()
@@ -497,7 +608,7 @@ def highlight_for_extension_cached(
 def sync_highlights(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
-    mut hls: List[Highlight], dirty_max_row: Int = -1,
+    mut hls: HighlightList, dirty_max_row: Int = -1,
 ):
     """``highlight_incremental`` for a caller that keeps the result in
     ``hls`` between calls (an ``Editor``), without the buffer's highlights
@@ -528,9 +639,9 @@ def sync_highlights(
         # ``language=`` (in a comment, or naming a language with no
         # grammar) comes back unchanged, and is lent like any other rather
         # than held twice for as long as it's open.
-        if not _same_highlights(hls, cache.highlights):
+        if not hls.same_as(cache.highlights):
             return
-    hls = List[Highlight]()
+    hls = HighlightList()
     swap(hls, cache.highlights)
     cache.lent_len = len(hls)
 
@@ -619,25 +730,17 @@ def highlight_incremental(
     """
     var fb = _grammar_pass(ext, lines, dirty_row, registry, cache, dirty_max_row)
     if fb:
-        return fb.take()
+        return fb.take().to_list()
+    if not _overlays_may_apply(ext, cache.ext, lines):
+        return cache.highlights.to_list()
     var out = cache.highlights.copy()
     _apply_overlays(ext, cache.ext, lines, out, registry)
-    return out^
-
-
-def _same_highlights(a: List[Highlight], b: List[Highlight]) -> Bool:
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        if a[i].row != b[i].row or a[i].col_start != b[i].col_start \
-                or a[i].col_end != b[i].col_end or a[i].attr != b[i].attr:
-            return False
-    return True
+    return out.to_list()
 
 
 def _apply_overlays(
     ext: String, cache_key: String, lines: List[String],
-    mut hls: List[Highlight], mut registry: GrammarRegistry,
+    mut hls: HighlightList, mut registry: GrammarRegistry,
 ):
     """The passes layered over a tokenizer's output: ``language=`` /
     Markdown-fence injections, then Django template tags."""
@@ -663,8 +766,8 @@ def _overlays_may_apply(
 def _fallback_with_overlays(
     ext: String, cache_key: String, lines: List[String],
     mut registry: GrammarRegistry,
-) -> List[Highlight]:
-    var fb = _fallback_for_extension(ext, lines)
+) -> HighlightList:
+    var fb = HighlightList.from_list(_fallback_for_extension(ext, lines))
     _apply_overlays(ext, cache_key, lines, fb, registry)
     return fb^
 
@@ -673,7 +776,7 @@ def _grammar_pass(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
     dirty_max_row: Int,
-) -> Optional[List[Highlight]]:
+) -> Optional[HighlightList]:
     """``highlight_incremental``'s tokenizing half. Leaves the grammar's
     own output (no overlays) in ``cache.highlights`` and returns empty;
     when no grammar applies, returns the generic tokenizer's result with
@@ -764,18 +867,13 @@ def _grammar_pass(
     # because that's where the tokenizer stopped. Sized up front (the
     # replaced rows' spans are the only slack): grown from empty, the list
     # doubled its way there on every keystroke, a dozen copies of itself.
-    var out = List[Highlight](
+    var out = HighlightList(
         capacity=len(cache.highlights) + len(new_hls),
     )
-    for i in range(len(cache.highlights)):
-        if cache.highlights[i].row < eff_dirty:
-            out.append(cache.highlights[i])
-    for i in range(len(new_hls)):
-        out.append(new_hls[i])
+    out.extend(cache.highlights, 0, eff_dirty)
+    out.extend(new_hls)
     if stable_row < n_lines:
-        for i in range(len(cache.highlights)):
-            if cache.highlights[i].row >= stable_row:
-                out.append(cache.highlights[i])
+        out.extend(cache.highlights, stable_row)
 
     # Update cached post_stacks: rows ``[eff_dirty, stable_row)`` take the
     # new ones, in place. The tokenizer appended exactly one stack per row
@@ -1916,7 +2014,7 @@ struct _DjangoTag(ImplicitlyCopyable, Movable):
 
 
 def _apply_django_template_overlay(
-    lang_key: String, lines: List[String], mut hls: List[Highlight],
+    lang_key: String, lines: List[String], mut hls: HighlightList,
 ):
     """Overlay Django template-tag colours on ``hls`` for django-language
     buffers (``lang_key`` like ``"django-html"``). No-op for any other
@@ -1938,7 +2036,7 @@ def _apply_django_template_overlay(
     var kw = highlight_keyword_attr()
     var cm = highlight_comment_attr()
     var n = len(lines)
-    var buckets = _hl_buckets(hls, n)
+    var buckets = _hl_buckets(hls.to_list(), n)
     for row in range(n):
         var b = lines[row].as_bytes()
         var L = len(b)
@@ -2047,7 +2145,7 @@ struct _StringBody(ImplicitlyCopyable, Movable):
 
 
 def _apply_intellij_injections(
-    ext: String, lines: List[String], mut hls: List[Highlight],
+    ext: String, lines: List[String], mut hls: HighlightList,
     mut registry: GrammarRegistry,
 ):
     """Scan ``lines`` for IntelliJ-style ``language=NAME`` markers and
@@ -2104,7 +2202,7 @@ def _md_fence_info(line: String, start: Int) -> String:
 
 
 def _apply_markdown_fence_injections(
-    lines: List[String], mut hls: List[Highlight],
+    lines: List[String], mut hls: HighlightList,
     mut registry: GrammarRegistry,
 ):
     """For each fenced code block that carries an info string
@@ -2374,7 +2472,7 @@ def embedded_language_extensions(lines: List[String]) -> List[String]:
 
 def _inject_grammar(
     lang: String, lines: List[String], body: _StringBody,
-    mut hls: List[Highlight], mut registry: GrammarRegistry,
+    mut hls: HighlightList, mut registry: GrammarRegistry,
 ):
     """Tokenize ``body`` with the grammar for ``lang`` and overlay the
     resulting highlights onto ``hls``. Drops any existing highlights
@@ -2461,7 +2559,7 @@ def _slice_body_lines(
 
 
 def _drop_highlights_in_body(
-    mut hls: List[Highlight], body: _StringBody,
+    mut hls: HighlightList, body: _StringBody,
 ):
     """Filter out highlights whose range lies inside the body. We
     keep the open/close quote highlights (they sit *outside* the
@@ -2469,7 +2567,7 @@ def _drop_highlights_in_body(
     is a string is preserved on the surrounding bytes; the body
     itself is wiped so the injected grammar's highlights don't
     composite over a uniform string-red underneath."""
-    var kept = List[Highlight]()
+    var kept = HighlightList(capacity=len(hls))
     for i in range(len(hls)):
         var hl = hls[i]
         if hl.row < body.start_row or hl.row > body.end_row:
@@ -2492,6 +2590,4 @@ def _drop_highlights_in_body(
             continue
         # Row strictly between the body's first and last — entire
         # row is inside the body, drop unconditionally.
-    hls.clear()
-    for i in range(len(kept)):
-        hls.append(kept[i])
+    hls = kept^

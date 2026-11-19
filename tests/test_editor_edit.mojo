@@ -34,7 +34,7 @@ from turbokod.lsp_dispatch import (
     DIAG_SEVERITY_WARNING, Diagnostic, TextEditEntry
 )
 from turbokod.highlight import (
-    GrammarRegistry, Highlight, highlight_for_extension,
+    GrammarRegistry, Highlight, HighlightList, highlight_for_extension,
     highlight_keyword_attr, highlight_string_attr
 )
 from turbokod.posix import which
@@ -818,7 +818,7 @@ def test_editor_rename_multirow_refreshes_all_highlights() raises:
     assert_true(ed.apply_text_edits(edits^))
     ed.flush_highlights(registry, speller)
 
-    var s_incr = _hl_set(ed.highlights)
+    var s_incr = _hl_set(ed.highlights.to_list())
     var s_full = _hl_set(highlight_for_extension(String("rs"), ed.buffer.lines))
     assert_equal(len(s_incr), len(s_full))
     for i in range(len(s_incr)):
@@ -2178,13 +2178,17 @@ def test_editor_row_index_skips_the_order_list_when_in_row_order() raises:
     assert_equal(ed._hl_at(two[0]), 1)
     assert_equal(ed._hl_at(two[0] + 1), 2)
     # A row past the end isn't indexed, so positions stop matching indices.
-    ed.highlights.insert(0, Highlight(7, 0, 1, highlight_string_attr()))
+    ed.highlights = HighlightList()
+    ed.highlights.append(Highlight(7, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(0, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(2, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(2, 1, 2, highlight_string_attr()))
     ed._index_highlights()
     assert_equal(len(ed._hl_order), 3)
     var zero = ed._hl_rows(0)
     assert_equal(ed._hl_at(zero[0]), 1)
     # Out of row order.
-    ed.highlights = List[Highlight]()
+    ed.highlights = HighlightList()
     ed.highlights.append(Highlight(2, 0, 1, highlight_string_attr()))
     ed.highlights.append(Highlight(0, 0, 1, highlight_string_attr()))
     ed._index_highlights()
