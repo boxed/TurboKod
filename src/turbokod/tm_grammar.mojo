@@ -107,6 +107,17 @@ def _has_cross_backref(src: String) -> Bool:
     return False
 
 
+def _mentions_g_anchor(src: String) -> Bool:
+    """Whether ``src`` contains a backslash followed by ``G``. An escaped
+    backslash before a literal G reads as one too, which only costs the
+    tokenizer a search it could have skipped."""
+    var b = src.as_bytes()
+    for i in range(len(b) - 1):
+        if b[i] == 0x5C and b[i + 1] == 0x47:
+            return True
+    return False
+
+
 struct Pattern(Copyable, Movable):
     """Flat representation of one TextMate pattern.
 
@@ -211,6 +222,11 @@ struct Grammar(Copyable, Movable):
     file."""
     var _regex_done: List[UInt8]
     """1 once ``regex`` has settled a slot — compiled, or found dead."""
+    var regex_has_g: List[Bool]
+    """Whether a regex's source mentions ``\\G``. Only such a regex can
+    match differently under ``ONIG_OPTION_NOT_BEGIN_POSITION`` (the option
+    makes ``\\G`` fail and touches nothing else), which is what lets the
+    tokenizer keep every other regex's cached result when it flips."""
     # Parallel arrays for the repository: ``repo_keys[i]`` resolves
     # to ``repo_pattern_idxs[i]``. Linear lookup; the table is small
     # (typically 50–200 entries even for a fat grammar) so a hash
@@ -240,8 +256,10 @@ struct Grammar(Copyable, Movable):
         self.patterns = patterns^
         self.regexes = List[OnigRegex](capacity=len(regex_sources))
         self._regex_done = List[UInt8](length=len(regex_sources), fill=0)
-        for _ in range(len(regex_sources)):
+        self.regex_has_g = List[Bool](capacity=len(regex_sources))
+        for i in range(len(regex_sources)):
             self.regexes.append(OnigRegex(never=True))
+            self.regex_has_g.append(_mentions_g_anchor(regex_sources[i]))
         self.regex_sources = regex_sources^
         self.regex_partner = regex_partner^
         self.repo_keys = repo_keys^
@@ -266,6 +284,7 @@ struct Grammar(Copyable, Movable):
         self.regex_sources = copy.regex_sources.copy()
         self.regex_partner = copy.regex_partner.copy()
         self._regex_done = copy._regex_done.copy()
+        self.regex_has_g = copy.regex_has_g.copy()
         self.repo_keys = copy.repo_keys.copy()
         self.repo_pattern_idxs = copy.repo_pattern_idxs.copy()
         var ext_roots_copy = List[List[Int]]()

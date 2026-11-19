@@ -156,6 +156,34 @@ struct _Cand(ImplicitlyCopyable, Movable):
     """
     var pattern_idx: Int
     var regex_idx: Int
+    var anchored: Bool
+    """The regex mentions ``\\G`` (``Grammar.regex_has_g``): what it
+    matches depends on ``ONIG_OPTION_NOT_BEGIN_POSITION``, so a cached
+    result for it doesn't survive that option changing."""
+
+
+struct _CandidateMemo(Movable):
+    """The candidate list for each stack top met during one tokenize
+    call. A list depends only on the grammar and the top frame's pattern,
+    and building one follows every ``include`` under it — for a C or Go
+    file that expansion, redone at each scope change, was a seventh of
+    the whole pass."""
+    var tops: List[Int]
+    var lists: List[List[_Cand]]
+
+    def __init__(out self):
+        self.tops = List[Int]()
+        self.lists = List[List[_Cand]]()
+
+    def slot(mut self, grammar: Grammar, top_pattern: Int) -> Int:
+        """Index in ``lists`` of the candidates under ``top_pattern``
+        (-1: the empty stack), built on first use."""
+        for i in range(len(self.tops)):
+            if self.tops[i] == top_pattern:
+                return i
+        self.tops.append(top_pattern)
+        self.lists.append(_candidates_under(grammar, top_pattern))
+        return len(self.tops) - 1
 
 
 def tokenize_with_grammar(
@@ -189,12 +217,13 @@ def tokenize_with_grammar_full(
     table.stacks.clear()
     var out = HighlightList(capacity=size_hint)
     var stack = List[Frame]()
+    var memo = _CandidateMemo()
     var last = -1
     for row in range(len(lines)):
         var next_line = String("")
         if row + 1 < len(lines):
             next_line = lines[row + 1]
-        _tokenize_line(grammar, lines[row], next_line, row, stack, out)
+        _tokenize_line(grammar, lines[row], next_line, row, stack, out, memo)
         last = table.intern(stack, last)
         post_ids.append(Int32(last))
     return out^
@@ -240,13 +269,14 @@ def tokenize_lines_from(
     post_ids.clear()
     var out = HighlightList()
     var stack = copy_stack(start_stack)
+    var memo = _CandidateMemo()
     var row = start_row
     var last = -1
     while row < len(lines):
         var next_line = String("")
         if row + 1 < len(lines):
             next_line = lines[row + 1]
-        _tokenize_line(grammar, lines[row], next_line, row, stack, out)
+        _tokenize_line(grammar, lines[row], next_line, row, stack, out, memo)
         last = table.intern(stack, last)
         post_ids.append(Int32(last))
         if row >= min_row \
@@ -262,6 +292,7 @@ def tokenize_lines_from(
 def _tokenize_line(
     grammar: Grammar, line: String, next_line: String, row: Int,
     mut stack: List[Frame], mut out: HighlightList,
+    mut memo: _CandidateMemo,
 ):
     """Tokenize one line, owning the line-local dynamic regexes.
 
@@ -278,7 +309,8 @@ def _tokenize_line(
     var dyn_regexes = List[OnigRegex]()
     try:
         _tokenize_line_scan(
-            grammar, line, next_line, row, stack, out, dyn_keys, dyn_regexes,
+            grammar, line, next_line, row, stack, out, memo,
+            dyn_keys, dyn_regexes,
         )
     finally:
         for i in range(len(dyn_regexes)):
@@ -288,6 +320,7 @@ def _tokenize_line(
 def _tokenize_line_scan(
     grammar: Grammar, line: String, next_line: String, row: Int,
     mut stack: List[Frame], mut out: HighlightList,
+    mut memo: _CandidateMemo,
     mut dyn_keys: List[String], mut dyn_regexes: List[OnigRegex],
 ):
     var hb = line.as_bytes()
@@ -322,9 +355,9 @@ def _tokenize_line_scan(
         g_pos = pos
 
     # The active candidate set depends only on the top frame's
-    # ``pattern_idx`` (or the empty-stack root set), so recompute it only
-    # when the stack top changes rather than rebuilding the list — with its
-    # pattern copies and include expansion — at every position.
+    # ``pattern_idx`` (or the empty-stack root set), so it changes only
+    # when the stack top does, and ``memo`` keeps each one built during
+    # this tokenize call.
     var cands = List[_Cand]()
     var cands_top = -2  # sentinel: forces the first build (-1 == empty stack)
     # Dynamically recompiled end regexes for back-referencing ``end``
@@ -339,17 +372,33 @@ def _tokenize_line_scan(
     # by raising (see ``_tokenize_line``).
     var dyn_end = Optional[OnigRegex]()
     # Per-candidate cached search result, reused across advancing positions
-    # while the candidate set and search options are unchanged. ``cached_start``
-    # is the cached match's start column, ``-1`` (no match in the rest of the
-    # line, valid forever), or ``-2`` (unknown — must search). A cached match
-    # stays valid while it's still at or ahead of ``pos``; once ``pos`` moves
-    # past it we re-search. A ``\G``-anchored match has start == its search
+    # while the candidate set is unchanged. ``cached_start`` is the cached
+    # match's start column, ``-1`` (no match in the rest of the line, valid
+    # forever), or ``-2`` (unknown — must search). A cached match stays
+    # valid while it's still at or ahead of ``pos``; once ``pos`` moves past
+    # it we re-search. A ``\G``-anchored match has start == its search
     # start, so the "still ahead" test only reuses it at the identical
-    # position, which keeps the anchor semantics correct.
+    # position. ``ONIG_OPTION_NOT_BEGIN_POSITION`` changes what ``\G`` can
+    # match and nothing else, so when the option flips — it does on every
+    # line, after the first match — only the ``anchored`` candidates'
+    # results are dropped. (Dropping all of them searched every candidate
+    # twice per line.)
     var cached_start = List[Int]()
     var cached_match = List[OnigMatch]()
     var cache_opts = ONIG_OPTION_NONE
     var cache_ready = False
+    # The results of the candidate sets this line has left behind, by
+    # ``memo`` slot. A set comes back whenever its scope does — after every
+    # ``(...)`` or ``{...}`` that closes — and what its regexes found
+    # further along the line still holds, so only the candidates that
+    # depend on more than the text (``anchored`` ones, and the frame's own
+    # end) are searched again. Starting each return from nothing made a
+    # line cost its length times its scope changes: a second for one 9 KB
+    # line of CSS.
+    var cands_slot = -1
+    var parked_slots = List[Int]()
+    var parked_starts = List[List[Int]]()
+    var parked_matches = List[List[OnigMatch]]()
     # Stuck guard: count consecutive iterations that don't advance ``pos``.
     # Zero-width begin pushes and zero-width end pops are legitimate
     # no-advance steps (bounded by grammar nesting depth), but a begin↔end
@@ -371,7 +420,12 @@ def _tokenize_line_scan(
         var cur_top = -1 if len(stack) == 0 \
             else stack[len(stack) - 1].pattern_idx
         if cur_top != cands_top:
-            cands = _active_candidates(grammar, stack)
+            if cands_slot >= 0:
+                parked_slots.append(cands_slot)
+                parked_starts.append(cached_start^)
+                parked_matches.append(cached_match^)
+            cands_slot = memo.slot(grammar, cur_top)
+            cands = memo.lists[cands_slot].copy()
             cands_top = cur_top
             # Recompute the top frame's substituted end regex (if its
             # end back-references begin captures). Empty stack or a
@@ -382,14 +436,25 @@ def _tokenize_line_scan(
                 dyn_end = _dyn_end_regex(
                     grammar, stack[len(stack) - 1], dyn_keys, dyn_regexes,
                 )
-            # New candidate set → the by-index cache is stale; rebuild empty.
-            cached_start = List[Int]()
-            cached_match = List[OnigMatch]()
-            for _ in range(len(cands)):
-                cached_start.append(-2)
-                cached_match.append(
-                    OnigMatch(-1, -1, List[Int](), List[Int]())
-                )
+            var parked = -1
+            for k in range(len(parked_slots)):
+                if parked_slots[k] == cands_slot:
+                    parked = k
+                    break
+            if parked >= 0:
+                _ = parked_slots.pop(parked)
+                cached_start = parked_starts.pop(parked)
+                cached_match = parked_matches.pop(parked)
+                for ci in range(len(cands)):
+                    if cands[ci].anchored or cands[ci].pattern_idx < 0:
+                        cached_start[ci] = -2
+            else:
+                cached_start = List[Int](length=len(cands), fill=-2)
+                cached_match = List[OnigMatch](capacity=len(cands))
+                for _ in range(len(cands)):
+                    cached_match.append(
+                        OnigMatch(-1, -1, List[Int](), List[Int]())
+                    )
             cache_ready = False
         # Find the earliest match across all candidates. Among ties,
         # the candidate listed first in ``cands`` wins — this mirrors
@@ -399,16 +464,16 @@ def _tokenize_line_scan(
         var search_options = ONIG_OPTION_NONE
         if pos != g_pos:
             search_options = ONIG_OPTION_NOT_BEGIN_POSITION
-        if (not cache_ready) or search_options != cache_opts:
-            # First pass for this candidate set, or the NOT_BEGIN_POSITION
-            # option flipped — anchors (\G, \A, ^) at the search start can
-            # then match differently, so drop the cache and re-search here.
-            for ci in range(len(cached_start)):
-                cached_start[ci] = -2
+        if not cache_ready:
             cache_opts = search_options
             cache_ready = True
+        elif search_options != cache_opts:
+            for ci in range(len(cands)):
+                if cands[ci].anchored:
+                    cached_start[ci] = -2
+            cache_opts = search_options
         var best_idx = -1
-        var best_match = OnigMatch(-1, -1, List[Int](), List[Int]())
+        var best_start = -1
         for ci in range(len(cands)):
             var cs = cached_start[ci]
             if cs == -2 or (cs >= 0 and cs < pos):
@@ -423,16 +488,15 @@ def _tokenize_line_scan(
                     var rx = grammar.regex(cands[ci].regex_idx)
                     m_opt = rx.search_at(line, pos, search_options)
                 if m_opt:
-                    cached_match[ci] = m_opt.value().copy()
+                    cached_match[ci] = m_opt.take()
                     cached_start[ci] = cached_match[ci].start
                 else:
                     cached_start[ci] = -1  # no match in the rest of the line
                 cs = cached_start[ci]
             # ``cs`` is now -1 (no match) or >= pos (match at/ahead of pos).
-            if cs >= 0:
-                if best_idx < 0 or cs < best_match.start:
-                    best_idx = ci
-                    best_match = cached_match[ci].copy()
+            if cs >= 0 and (best_idx < 0 or cs < best_start):
+                best_idx = ci
+                best_start = cs
         if best_idx < 0:
             # No match in the rest of the line — the body of an open
             # scope (or the unmatched tail outside any scope) just
@@ -441,6 +505,9 @@ def _tokenize_line_scan(
             pos = n
             continue
 
+        # Borrowed from the cache: nothing below replaces ``cached_match``
+        # before the next iteration.
+        ref best_match = cached_match[best_idx]
         var match_start = best_match.start
         var match_end = best_match.end
         # ``\\G`` anchor for the *next* search is the libonig
@@ -798,7 +865,7 @@ def _emit_capture_subtokens(
             var m_opt = rx.search_at(sub, pos)
             if not m_opt:
                 continue
-            var m = m_opt.value().copy()
+            var m = m_opt.take()
             if best_idx < 0 or m.start < best_match.start:
                 best_idx = ci
                 best_match = m^
@@ -968,14 +1035,15 @@ def _join_scope(chain: String, leaf: String) -> String:
     return chain + String(" ") + leaf
 
 
-def _active_candidates(
-    grammar: Grammar, stack: List[Frame],
+def _candidates_under(
+    grammar: Grammar, top_pattern: Int,
 ) -> List[_Cand]:
-    """Build the list of patterns to probe at the current position.
+    """Build the list of patterns to probe while ``top_pattern`` is the
+    top frame's pattern (-1: the stack is empty).
 
     The order is:
-    1. The top-of-stack ``end`` regex (if the stack is non-empty),
-       so that a closing match wins on ties.
+    1. The top frame's ``end`` regex (if there is a frame), so that a
+       closing match wins on ties.
     2. The patterns listed inside the top frame (or the grammar's
        ``root_patterns`` when the stack is empty), with ``include``
        references expanded transitively.
@@ -986,26 +1054,25 @@ def _active_candidates(
     itself; without the guard that's an infinite loop.
     """
     var out = List[_Cand]()
-    if len(stack) > 0:
-        var top = stack[len(stack) - 1]
-        ref top_pat = grammar.patterns[top.pattern_idx]
-        # ``BEGIN_WHILE`` frames don't have an end-regex candidate —
-        # their lifetime is gated by the per-line ``while`` check
-        # in ``_process_while_frames``, not an inline match.
-        if top_pat.kind == PATTERN_BEGIN_END:
-            out.append(_Cand(-1, top_pat.end_idx))
-
-    var roots: List[Int]
-    if len(stack) == 0:
-        roots = grammar.root_patterns.copy()
-    else:
-        var top = stack[len(stack) - 1]
-        roots = grammar.patterns[top.pattern_idx].nested.copy()
-
     var seen = List[Int]()
-    for k in range(len(roots)):
-        _expand_into(grammar, roots[k], out, seen)
+    if top_pattern < 0:
+        for k in range(len(grammar.root_patterns)):
+            _expand_into(grammar, grammar.root_patterns[k], out, seen)
+        return out^
+    ref top_pat = grammar.patterns[top_pattern]
+    # ``BEGIN_WHILE`` frames don't have an end-regex candidate —
+    # their lifetime is gated by the per-line ``while`` check
+    # in ``_process_while_frames``, not an inline match.
+    if top_pat.kind == PATTERN_BEGIN_END:
+        out.append(_Cand(-1, top_pat.end_idx, _has_g(grammar, top_pat.end_idx)))
+    for k in range(len(top_pat.nested)):
+        _expand_into(grammar, top_pat.nested[k], out, seen)
     return out^
+
+
+def _has_g(grammar: Grammar, regex_idx: Int) -> Bool:
+    return regex_idx >= 0 and regex_idx < len(grammar.regex_has_g) \
+        and grammar.regex_has_g[regex_idx]
 
 
 def _expand_into(
@@ -1053,14 +1120,18 @@ def _expand_into(
             _expand_into(grammar, pat.nested[k], out, seen)
         return
     if pat.kind == PATTERN_MATCH:
-        out.append(_Cand(pattern_idx, pat.match_idx))
+        out.append(
+            _Cand(pattern_idx, pat.match_idx, _has_g(grammar, pat.match_idx))
+        )
         return
     if pat.kind == PATTERN_BEGIN_END or pat.kind == PATTERN_BEGIN_WHILE:
         # Probe the begin regex; the end-or-while regex is consulted
         # later — for ``BEGIN_END`` via the top-of-stack candidate
-        # in ``_active_candidates``, for ``BEGIN_WHILE`` via the
+        # in ``_candidates_under``, for ``BEGIN_WHILE`` via the
         # per-line check in ``_process_while_frames``.
-        out.append(_Cand(pattern_idx, pat.match_idx))
+        out.append(
+            _Cand(pattern_idx, pat.match_idx, _has_g(grammar, pat.match_idx))
+        )
         return
 
 

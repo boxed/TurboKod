@@ -91,6 +91,40 @@ Two rules came out of that:
 The same shape applies to branch and commit selections, which spawn
 `git log` / `git show` per selection through the same path.
 
+## Tokenizer throughput
+
+A file open tokenizes the whole buffer in one pass, so the TextMate
+tokenizer's speed is the open latency of a big file.
+[`bench/tokenize_bench.mojo`](../bench/tokenize_bench.mojo) times a full
+pass per file and prints a checksum over every highlight, so a change can
+be shown to leave the output alone:
+
+```sh
+./run.sh bench/tokenize_bench.mojo src/turbokod/desktop.mojo some/file.c
+```
+
+Nearly all of a pass is libonig searching, so what matters is how many
+searches run. Three rules in `_tokenize_line_scan`, worth 2.7x over a
+corpus of 80 real files in 28 languages (a 12k-line C file 1.7 s to 0.74
+s, a 4k-line Go file 730 ms to 245 ms; one 9 KB line of CSS 1 s to 33 ms):
+
+1. **A search result is kept for as long as it can be.** A regex without
+   `\G` finds the same thing wherever the search starts, so its cached
+   match (or "nothing on the rest of this line") holds until the position
+   passes it. `ONIG_OPTION_NOT_BEGIN_POSITION` flips after the first match
+   on every line and only changes what `\G` can match
+   (`Grammar.regex_has_g`), so only those candidates are dropped then.
+2. **A candidate set's results survive leaving its scope.** Closing a
+   `(...)` returns to the set that was active before it; its results are
+   parked by `_CandidateMemo` slot for the rest of the line rather than
+   searched again. Without that a line cost its length times its scope
+   changes, which is what made long lines pathological.
+3. **A candidate list is built once per tokenize call**
+   (`_CandidateMemo`). It depends only on the top frame's pattern, and
+   building it follows every `include` beneath.
+
+The shell grammar is the remaining outlier (about 0.8 ms a line).
+
 ## Hot-path traps (do not reintroduce)
 
 1. **`.copy()` / `var x = bigStruct` in a hot path deep-copies the whole

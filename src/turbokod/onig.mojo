@@ -356,8 +356,8 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         var num_regs = _read_int32(self._region + 4)
         var beg_arr = _read_ptr(self._region + 8)
         var end_arr = _read_ptr(self._region + 16)
-        var starts = List[Int]()
-        var ends = List[Int]()
+        var starts = List[Int](capacity=num_regs)
+        var ends = List[Int](capacity=num_regs)
         for i in range(num_regs):
             starts.append(_read_int32(beg_arr + i * 4))
             ends.append(_read_int32(end_arr + i * 4))
