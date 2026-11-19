@@ -597,6 +597,12 @@ struct HighlightCache(Copyable, Movable):
     buffer is done (``pending`` is then False) — which, for a big file,
     is some frames after it opened: a pass given a ``need_row`` stops once
     the rows on screen are done and its time is up."""
+    var spec_lo: Int
+    """Rows ``[spec_lo, spec_hi]`` carry *speculative* highlights: the
+    window was far below ``pending_row``, so they were tokenized as if
+    the row above them were top-level code, to have something to show
+    until the real pass gets there (``_speculate``). -1 for none."""
+    var spec_hi: Int
     var stacks: StackTable
     var full_passes: Int
     """How many times this cache has started the buffer over from the top
@@ -614,6 +620,8 @@ struct HighlightCache(Copyable, Movable):
         self.lent_len = -1
         self.post_stacks = List[Int32]()
         self.pending_row = 0
+        self.spec_lo = -1
+        self.spec_hi = -1
         self.stacks = StackTable()
         self.full_passes = 0
         self.marker_rows = List[Int32]()
@@ -627,6 +635,8 @@ struct HighlightCache(Copyable, Movable):
         self.lent_len = -1
         self.post_stacks = List[Int32]()
         self.pending_row = 0
+        self.spec_lo = -1
+        self.spec_hi = -1
         self.stacks = StackTable()
         self.marker_lines = -1
 
@@ -658,7 +668,7 @@ def sync_highlights(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
     mut hls: HighlightList, dirty_max_row: Int = -1,
-    need_row: Int = -1, budget_ms: Int = 0,
+    need_row: Int = -1, budget_ms: Int = 0, view_top: Int = -1,
 ):
     """``highlight_incremental`` for a caller that keeps the result in
     ``hls`` between calls (an ``Editor``), without the buffer's highlights
@@ -674,7 +684,10 @@ def sync_highlights(
     With ``need_row >= 0`` the pass may stop early — once that row is
     tokenized and ``budget_ms`` is spent — leaving ``cache.pending()``
     set: the caller calls again (an ``Editor`` does on its next paint)
-    and it resumes. Without, the result is always complete."""
+    and it resumes. Without, the result is always complete. ``view_top``
+    is the first row on screen: when that is far below what has been
+    tokenized, its rows are colored speculatively first (``_speculate``)
+    rather than making the frame wait for everything above them."""
     var first = dirty_row
     if cache.lent_len >= 0:
         if len(hls) == cache.lent_len:
@@ -685,6 +698,7 @@ def sync_highlights(
             first = 0
     var fb = _grammar_pass(
         ext, lines, first, registry, cache, dirty_max_row, need_row, budget_ms,
+        view_top,
     )
     if fb:
         hls = fb.take()
@@ -879,6 +893,7 @@ def _grammar_pass(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
     dirty_max_row: Int, need_row: Int = -1, budget_ms: Int = 0,
+    view_top: Int = -1,
 ) -> Optional[HighlightList]:
     """``highlight_incremental``'s tokenizing half. Leaves the grammar's
     own output (no overlays) in ``cache.highlights`` and returns empty;
@@ -953,11 +968,30 @@ def _grammar_pass(
                 cache.post_stacks[r] = Int32(-1)
             if eff_dirty < cache.pending_row:
                 cache.pending_row = eff_dirty
+            # The rows moved or changed under any speculative colors.
+            cache.spec_lo = -1
+            cache.spec_hi = -1
     if start_over:
         _start_over(cache, lines)
     var deadline_ms = 0
     if need_row >= 0 and budget_ms > 0:
         deadline_ms = monotonic_ms() + budget_ms
+    # The window is far below what is tokenized — a file opened where it
+    # was left, a jump to a definition — and has nothing of its own to
+    # show: color its rows on a guess now, and give the real pass its time
+    # slice without making the frame wait for it to get there.
+    var need = need_row
+    if need_row >= 0 and view_top >= 0 and view_top < n_lines \
+            and view_top - cache.pending_row > _SPECULATE_GAP_ROWS \
+            and cache.post_stacks[view_top] == -1:
+        var view_bottom = min(view_top + (need_row - view_top) // 2, n_lines - 1)
+        if not (cache.spec_lo >= 0 and cache.spec_lo <= view_top
+                and view_bottom <= cache.spec_hi):
+            _speculate(
+                grammar_store_at(registry._store)[].grammars[grammar_idx],
+                cache, lines, view_top, min(need_row, n_lines - 1),
+            )
+        need = 0
     while cache.pending():
         var start = cache.pending_row
         var start_stack = List[Frame]()
@@ -983,7 +1017,7 @@ def _grammar_pass(
         var new_hls = tokenize_lines_from(
             grammar_store_at(registry._store)[].grammars[grammar_idx], lines,
             start, start_stack, cache.post_stacks, cache.stacks, new_post,
-            stable_row, rejoined, need_row, deadline_ms, hint,
+            stable_row, rejoined, need, deadline_ms, hint,
         )
         if len(cache.highlights) == 0:
             cache.highlights = new_hls^
@@ -1061,11 +1095,64 @@ def _move_cached_tail(
     return True
 
 
+comptime _SPECULATE_GAP_ROWS = 300
+"""How many untokenized rows above the window make ``_grammar_pass`` color
+it speculatively instead of tokenizing down to it in the same call: fewer
+than this is a couple of milliseconds, and is simply done."""
+
+comptime _SPECULATE_LEAD_ROWS = 200
+"""How far above the window ``_speculate`` looks for a line to start at."""
+
+
+def _speculate(
+    grammar: Grammar, mut cache: HighlightCache, lines: List[String],
+    view_top: Int, through: Int,
+):
+    """Give rows down to ``through`` highlights before the real pass has
+    reached them, by tokenizing from a line a little above ``view_top``
+    as if nothing were open there.
+
+    The start is the nearest line above the window with no indentation —
+    a ``def``, a ``struct``, a function's closing brace — which is right
+    wherever such a line is top-level code. Inside a long string or
+    comment it isn't, and the rows are colored as code until the real
+    pass arrives and replaces them (their post-stacks stay void, so it
+    stops at nothing here and trusts none of this). What it buys: a file
+    opened 9,000 lines down shows its colors in the first frame instead
+    of after everything above has been tokenized."""
+    var start = max(view_top - _SPECULATE_LEAD_ROWS, cache.pending_row)
+    var r = view_top
+    while r > start:
+        var b = lines[r].as_bytes()
+        if len(b) > 0 and b[0] != 0x20 and b[0] != 0x09:
+            start = r
+            break
+        r -= 1
+    var table = StackTable()
+    var posts = List[Int32]()
+    var cached = List[Int32]()
+    var stable_row = 0
+    var rejoined = False
+    var spec = tokenize_lines_from(
+        grammar, lines, start, List[Frame](), cached, table, posts,
+        stable_row, rejoined, through, 0,
+    )
+    var out = HighlightList(capacity=len(cache.highlights) + len(spec))
+    out.extend(cache.highlights, 0, start)
+    out.extend(spec)
+    out.extend(cache.highlights, through + 1)
+    cache.highlights = out^
+    cache.spec_lo = start
+    cache.spec_hi = through
+
+
 def _start_over(mut cache: HighlightCache, lines: List[String]):
     """Void everything cached for ``lines``: every row waits to be
     tokenized, from the top."""
     cache.post_stacks = List[Int32](length=len(lines), fill=-1)
     cache.pending_row = 0
+    cache.spec_lo = -1
+    cache.spec_hi = -1
     cache.stacks.stacks.clear()
     cache.highlights = HighlightList()
     cache.full_passes += 1

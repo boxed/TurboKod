@@ -1882,6 +1882,10 @@ struct Desktop(Movable):
     # against, so an unchanged frame skips the snapshot and the encode.
     var _session_fp: UInt64
     var _session_fp_valid: Bool
+    var _git_heads_pending: Bool
+    """A tab that isn't on screen still waits for its git baseline
+    (``_apply_view_config`` fetches one a paint): frames should keep
+    coming, as for any ``has_background_work``."""
     var _session_shape_fp: UInt64
     """``_session_fingerprint``'s second half as of the last write: which
     windows there are, their order and the focus. A change there is
@@ -1894,11 +1898,6 @@ struct Desktop(Movable):
     """A file got its first view state since the last write, which is
     written at once (a moved cursor waits)."""
     var _pending_restore_refit: Optional[Session]
-    # Progressive syntax coloring. True until the first frame that has an
-    # editor to show; that frame skips the cold TextMate tokenize so the
-    # window appears immediately with plain text, and the next frame paints
-    # the colors in. See the flush loop in ``paint``.
-    var _defer_first_highlight: Bool
     # Per-user breakpoint persistence. Mirrors the session-store pattern
     # — re-encode after every dap_tick and write only when the encoding
     # differs. Stored under ``per_user/<username>/`` alongside the
@@ -2247,13 +2246,13 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._session_fp_valid = False
         self._session_fp = UInt64(0)
+        self._git_heads_pending = False
         self._session_shape_fp = UInt64(0)
         self._session_saved_ms = -_UI_STATE_SAVE_MS
         self._view_states_saved_ms = -_UI_STATE_SAVE_MS
         self._view_states_grew = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
-        self._defer_first_highlight = True
         self._breakpoints_fp_valid = False
         self._breakpoints_fp = UInt64(0)
         self._last_breakpoints_json = String("")
@@ -4201,6 +4200,15 @@ struct Desktop(Movable):
         var caret_on = True
         if self.config.cursor_blink and self._editor_keyboard_live():
             caret_on = Desktop._caret_on_at(monotonic_ms(), self._last_input_ms)
+        # What's on screen comes first: a tab behind the others gets its
+        # git baseline (below) only on a paint where no window in view is
+        # still waiting for its colors.
+        var hidden_fetch_ok = True
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor and self.windows.shown(i) \
+                    and self.windows.windows[i].editor._highlights_dirty:
+                hidden_fetch_ok = False
+        self._git_heads_pending = False
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
@@ -4274,8 +4282,21 @@ struct Desktop(Movable):
                     # Step 1: fetch HEAD content once per file. Bracket
                     # the spawn with the loaded flag so untracked / new
                     # files don't re-spawn ``git show`` every paint.
-                    if len(fp.as_bytes()) > 0 \
-                            and not self.windows.windows[i].editor._git_head_loaded:
+                    # Each is a ``git show`` (9 ms): for the windows on
+                    # screen now, for a tab behind them one a paint, once
+                    # nothing on screen is waiting — restoring a session
+                    # of twenty tabs spent 180 ms here before its first
+                    # frame.
+                    var wants_head = len(fp.as_bytes()) > 0 \
+                        and not self.windows.windows[i].editor._git_head_loaded
+                    var fetch_now = wants_head and self.windows.shown(i)
+                    if wants_head and not fetch_now:
+                        if hidden_fetch_ok:
+                            fetch_now = True
+                            hidden_fetch_ok = False
+                        else:
+                            self._git_heads_pending = True
+                    if fetch_now:
                         var head = fetch_head_text(root, fp)
                         if head:
                             self.windows.windows[i].editor.set_git_head_text(
@@ -4954,24 +4975,19 @@ struct Desktop(Movable):
         # pinned baseline when that pass re-diffs it. May suspend review (on
         # a cross-file jump) or open/build the current changeset file.
         self._review_sync_window(screen)
+        # Which windows are on screen (``WindowManager.shown``) has to be
+        # known before the per-editor work below, on the first paint too:
+        # ``_fit_windows`` sets it again, after that work.
+        self.windows.tabbed = self.host_tabs() or self.tv_frame()
         # Sync the persisted view config into every editor before
         # measurement / paint so newly-added windows pick up the user's
         # saved preferences on their first frame.
         self._apply_view_config()
-        # Progressive syntax coloring: the very first frame that has an
-        # editor to show skips the cold TextMate tokenize (a fixed ~400 ms
-        # grammar compile, the dominant cost of the first paint) so the
-        # window appears immediately with plain text. The dirty flag stays
-        # set, so the next frame — ≤50 ms later via the 20 Hz timer — runs
-        # the flush and the change detector repaints with colors. Trades a
-        # brief uncolored flash for a much snappier time-to-window.
-        var skip_highlight = False
-        if self._defer_first_highlight:
-            for i in range(len(self.windows.windows)):
-                if self.windows.windows[i].is_editor:
-                    skip_highlight = True
-                    self._defer_first_highlight = False
-                    break
+        # (The first frame used to go out uncolored, the tokenizing left
+        # for the next: a grammar took 400 ms to compile then. Its regexes
+        # compile on first use now and only the rows on screen are
+        # tokenized, about 20 ms cold — less than the flash of plain text
+        # cost.)
         # Flush deferred highlight refreshes for every editor that
         # was edited since the last frame. ``flush_highlights`` is
         # a no-op when the dirty flag is clear, so this is cheap on
@@ -4994,7 +5010,11 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.set_test_file_globs(
                     self._pytest_file_globs,
                 )
-                if not skip_highlight:
+                # A tab behind the others isn't tokenized until it is
+                # shown: with twenty of them open that was most of the
+                # wait for the first colored frame, and their highlights
+                # are memory nothing reads.
+                if self.windows.shown(i):
                     # Right through what's on screen (and as far again,
                     # for a scroll before the next frame); the rest of a
                     # big file follows over the next frames. A small one
@@ -5008,10 +5028,12 @@ struct Desktop(Movable):
                     if slice_spent:
                         w.editor.flush_highlights(
                             self.grammar_registry, self.speller, need_row, 0,
+                            view_top=w.editor.scroll_y,
                         )
                     else:
                         w.editor.flush_highlights(
                             self.grammar_registry, self.speller, need_row,
+                            view_top=w.editor.scroll_y,
                         )
                         slice_spent = w.editor.highlights_pending()
         # Refit windows to the current workspace before painting. Cheap
@@ -18377,7 +18399,8 @@ struct Desktop(Movable):
     def has_background_work(self) -> Bool:
         """True while frame-sliced work is running that the user is
         waiting on (the Project ▸ Spelling scan and its library check, a
-        big file's syntax coloring below the first screen).
+        big file's syntax coloring below the first screen, the git
+        baselines of the tabs behind the one in view).
         The terminal loops poll for input without a timeout while this
         holds, so the work advances every frame instead of once per 50 ms
         idle wait."""
@@ -18385,6 +18408,8 @@ struct Desktop(Movable):
             self.spelling_dialog.scan.active
             or self.spelling_dialog.library_checking()
         ):
+            return True
+        if self._git_heads_pending:
             return True
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor \

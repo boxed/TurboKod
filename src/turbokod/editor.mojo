@@ -2341,6 +2341,7 @@ struct Editor(Copyable, Movable):
     def flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
         need_row: Int = -1, slice_ms: Int = _TOKENIZE_SLICE_MS,
+        view_top: Int = -1,
     ):
         """Bring ``self.highlights`` up to date by tokenizing against
         the shared ``GrammarRegistry``. No-op if not ``_highlights_dirty``.
@@ -2365,6 +2366,10 @@ struct Editor(Copyable, Movable):
         file's first screen is colored in its first frame instead of
         after the whole file, and so is an edit that changes the scope of
         everything below it. Without one the result is complete.
+        ``view_top`` is the first row on screen, for a window that is far
+        below what has been tokenized: its rows are colored on a guess
+        at once and corrected when the pass reaches them
+        (``highlight._speculate``).
         """
         # Refresh the gutter run-icons first — cheap line scan, and
         # independent of syntax tokenizing, so it runs even when the
@@ -2396,7 +2401,7 @@ struct Editor(Copyable, Movable):
         sync_highlights(
             ext, self.buffer.lines, min(self._hl_dirty_row, span[0]),
             registry, self._hl_cache, self.highlights,
-            max(last_edited, -1), need_row, slice_ms,
+            max(last_edited, -1), need_row, slice_ms, view_top,
         )
         # Still dirty while rows wait their turn: the next paint resumes.
         self._highlights_dirty = self._hl_cache.pending()

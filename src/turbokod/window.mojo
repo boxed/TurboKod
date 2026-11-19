@@ -2171,6 +2171,16 @@ struct WindowManager(Movable):
             self.windows[i]._last_observed_rect = self.windows[i].rect
 
 
+    def shown(self, idx: Int) -> Bool:
+        """Whether window ``idx`` is one ``paint`` draws: every window
+        when they overlap, only the top one when they are tabs — the
+        others are open but out of sight, and what only matters on screen
+        (syntax colors, the change gutter) can wait for them."""
+        if not self.tabbed:
+            return True
+        return len(self.z_order) > 0 \
+            and self.z_order[len(self.z_order) - 1] == idx
+
     def focus_by_index(mut self, idx: Int):
         """Focus window ``idx`` and raise it to the top of the z-order.
 

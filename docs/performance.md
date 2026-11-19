@@ -154,8 +154,40 @@ Swift host runs frames back to back with a 4 ms gap for input
 (`AppController.busyWake`), and the terminal loops poll with a 1 ms
 timeout. A buried window's work waits until it is visible.
 
-What's left of a big file's first frames after this is a synchronous
-`git show HEAD:<path>` for the change gutter (10-20 ms, in the paint).
+### What's on screen first
+
+Restoring a session is where the rest of the wait was. Each project
+window is a `Desktop` with (here) twenty tabs, one of them visible, and
+its first frames used to do everything for all twenty: a synchronous
+`git show HEAD:<path>` each for the change gutter (9 ms, two thirds of
+the time), a tokenize of each, a spell check of each — and then the next
+project's window did the same before either was drawn. Now:
+
+- only the windows `WindowManager.shown` says are on screen are
+  tokenized; a tab behind them is when it comes forward;
+- their git baselines are fetched at once, the hidden tabs' one a paint
+  afterwards (`has_background_work` keeps frames coming);
+- a window far below what has been tokenized is colored speculatively in
+  the same frame (`highlight._speculate`), instead of after every row
+  above it;
+- the first frame is no longer sent out uncolored. That deferral dates
+  from when a grammar took 400 ms to compile.
+
+Twenty Python files, the visible one 3,000 lines into a 5,800-line file,
+measured through the dylib:
+
+| | first colored frame | before |
+|---|---|---|
+| one project | frame 1, at 70 ms | frame 2, at 280 ms |
+| three projects | all three by 150 ms | 770 ms |
+
+The speculative colors are a guess — tokenized from the nearest
+unindented line above the window as if nothing were open there — and are
+replaced when the real pass arrives. They are wrong only inside a string
+or comment that started further up, and only until then.
+
+What's left of a restore's first frame is reading the twenty files
+(about 30 ms) and one `git show`.
 
 ## Hot-path traps (do not reintroduce)
 

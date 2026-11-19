@@ -117,6 +117,7 @@ def _assert_first_rows_match_full_pass(
 
 def _random_edits(
     ext: String, text: String, seed: Int, steps: Int, sliced: Bool = False,
+    drain_every: Int = 5,
 ) raises:
     """Type, split, join, paste, delete selections and undo at random,
     comparing with a full pass after every flush — and flushing only after
@@ -172,10 +173,19 @@ def _random_edits(
             var row = pick % rows
             ed.move_to(row, (pick // 11) % (ed.buffer.line_length(row) + 1), False)
         if sliced:
-            var need = (pick // 17) % ed.buffer.line_count()
-            ed.flush_highlights(registry, speller, need, 0)
-            _assert_first_rows_match_full_pass(ed, ext, registry, need, step)
-            if step % 5 == 4:
+            # The window anywhere in the buffer: far enough below what is
+            # tokenized and its rows are only a guess, so what has to be
+            # right is everything above ``pending_row``.
+            var top = (pick // 17) % ed.buffer.line_count()
+            var need = min(top + 60, ed.buffer.line_count() - 1)
+            ed.flush_highlights(registry, speller, need, 0, top)
+            if ed.highlights_pending():
+                _assert_first_rows_match_full_pass(
+                    ed, ext, registry, ed._hl_cache.pending_row - 1, step,
+                )
+            else:
+                _assert_matches_full_pass(ed, ext, registry, step)
+            if step % drain_every == drain_every - 1:
                 ed.flush_highlights(registry, speller)
                 assert_true(not ed.highlights_pending())
                 _assert_matches_full_pass(ed, ext, registry, step)
@@ -212,6 +222,57 @@ def test_random_edits_on_a_partly_tokenized_buffer_match_a_full_pass() raises:
     var marked = String("# language=html\nPAGE = \"<p class='a'>hi</p>\"\n") \
         + _python_text()
     _random_edits(String("py"), marked, 123, 300, True)
+
+
+def test_random_edits_far_below_what_is_tokenized_match_a_full_pass() raises:
+    # A buffer long enough that the window is often hundreds of rows past
+    # the frontier, where its rows are colored speculatively.
+    var text = String("")
+    for _ in range(45):
+        text += _python_text()
+    _random_edits(String("py"), text, 31, 120, True, 20)
+
+
+def test_a_window_far_down_a_big_file_is_colored_before_the_rows_above() raises:
+    # Opening a file where it was left, 600 lines down, tokenized those
+    # 600 lines before the first frame had any color.
+    var text = String("")
+    for i in range(500):
+        text += String("def f") + String(i) + String("(a):\n    return 'x'\n")
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    var ed = Editor(text)
+    ed.file_path = String("big.py")
+    ed.flush_highlights(registry, speller, 660, 0, 600)
+    assert_true(ed.highlights_pending())
+    assert_true(ed._hl_cache.pending_row < 600)
+    # The rows on screen have their colors already — here the right ones,
+    # the guess having started at a ``def``…
+    var cache = HighlightCache()
+    var full = HighlightList()
+    sync_highlights(String("py"), ed.buffer.lines, 0, registry, cache, full, -1)
+    var shown = 0
+    var b = 0
+    for a in range(len(ed.highlights)):
+        var h = ed.highlights[a]
+        if h.row < 600 or h.row > 660:
+            continue
+        while full.row(b) < 600:
+            b += 1
+        var f = full[b]
+        assert_equal(h.row, f.row)
+        assert_equal(h.col_start, f.col_start)
+        assert_equal(h.col_end, f.col_end)
+        assert_true(h.attr == f.attr)
+        shown += 1
+        b += 1
+    assert_true(shown > 100)
+    # …and the pass still gets to all of it.
+    ed.flush_highlights(registry, speller)
+    assert_true(not ed.highlights_pending())
+    assert_equal(ed._hl_cache.full_passes, 1)
+    _assert_matches_full_pass(ed, String("py"), registry, 0)
+    registry.release()
 
 
 def test_a_pass_stops_at_the_rows_asked_for_and_resumes() raises:
