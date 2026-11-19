@@ -870,10 +870,10 @@ struct LspManager(Copyable, Movable):
     # spec-mandated default ``utf-16``, and then byte columns are *not*
     # valid ``character`` offsets on any line containing multibyte text —
     # so every position crossing the transport is converted by
-    # ``_PositionRemapper``. ``_position_enc`` is the parsed tag driving
+    # ``_PositionRemapper``. ``_position_encoding_tag`` is the parsed tag driving
     # that; ``_position_encoding`` keeps the raw string for display.
     var _position_encoding: String
-    var _position_enc: UInt8
+    var _position_encoding_tag: UInt8
     # Line-index cache backing the conversion: open documents are
     # registered as they're sent and indexed only when a payload needs
     # them (see ``_PositionRemapper``).
@@ -909,7 +909,7 @@ struct LspManager(Copyable, Movable):
     # Close-handshake state. See the ``_CLOSE_*`` constants: the handshake is
     # driven by polls so a window close never waits on a language server.
     var _close_stage: UInt8
-    var _close_deadline: Int
+    var _close_deadline_ms: Int
     var _close_shutdown_id: String
     # Shared transport (``lsp_shared.mojo``). ``_channel`` is the address of
     # the ``LspChannel`` this manager is a session on, 0 for the private
@@ -1037,7 +1037,7 @@ struct LspManager(Copyable, Movable):
     # publishes ``_code_actions``.
     var _ca_resolve: _ResolveFanout
     var _ca_accum: List[CodeAction]
-    var _ca_resolve_deadline: Int
+    var _ca_resolve_deadline_ms: Int
     # Pending ``textDocument/rename`` request state. Same shape as the
     # code-action slots: an inflight id, an echoed origin path so a stale
     # response can be dropped, and a parked ``WorkspaceEdit`` (reusing the
@@ -1248,7 +1248,7 @@ struct LspManager(Copyable, Movable):
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
         self._position_encoding = String("utf-16")
-        self._position_enc = encoding_from_name(String("utf-16"))
+        self._position_encoding_tag = encoding_from_name(String("utf-16"))
         self._remap = _PositionRemapper(POS_UTF8)
         self._req_uris = List[_IdText]()
         self._awaited = List[_Awaited]()
@@ -1256,7 +1256,7 @@ struct LspManager(Copyable, Movable):
         self._refresh_doc_features = False
         self._refresh_diagnostics = False
         self._close_stage = _CLOSE_IDLE
-        self._close_deadline = 0
+        self._close_deadline_ms = 0
         self._channel = 0
         self._session = 0
         self._pool = 0
@@ -1298,7 +1298,7 @@ struct LspManager(Copyable, Movable):
         self._code_actions = _Slot[List[CodeAction]]()
         self._ca_resolve = _ResolveFanout()
         self._ca_accum = List[CodeAction]()
-        self._ca_resolve_deadline = 0
+        self._ca_resolve_deadline_ms = 0
         self._rename = _Slot[List[CodeActionFileEdit]]()
         self._formatting = _EditSlot()
         self._ontype = _EditSlot()
@@ -1615,7 +1615,7 @@ struct LspManager(Copyable, Movable):
         place. ``uri`` is the document the payload is implicitly about
         (the in-flight request's file) — positions carrying their own
         ``uri`` override it."""
-        if self._position_enc == POS_UTF8:
+        if self._position_encoding_tag == POS_UTF8:
             return
         self._remap.begin_walk()
         self._remap.walk(v, uri, True, self._docs)
@@ -1625,7 +1625,7 @@ struct LspManager(Copyable, Movable):
     ) raises -> String:
         """Send ``params`` with byte columns converted to the negotiated
         encoding — a copy only when there is something to convert."""
-        if self._position_enc == POS_UTF8:
+        if self._position_encoding_tag == POS_UTF8:
             return self._transport_send(method, params, is_request)
         var wire = params.copy()
         self._remap.begin_walk()
@@ -1674,7 +1674,7 @@ struct LspManager(Copyable, Movable):
             self._awaited.append(_Awaited(id, monotonic_ms()))
         # Only a non-utf-8 encoding remaps responses (see the dispatch's
         # ``_take_req_uri``), so under utf-8 there's nothing to remember.
-        if self._position_enc != POS_UTF8 \
+        if self._position_encoding_tag != POS_UTF8 \
                 and len(uri.as_bytes()) > 0 and len(id.as_bytes()) > 0:
             self._req_uris.append(_IdText(id, uri^))
             while len(self._req_uris) > _REQ_URI_RING:
@@ -1927,7 +1927,7 @@ struct LspManager(Copyable, Movable):
             return
         self._close_shutdown_id = shutdown_id^
         self._close_stage = _CLOSE_AWAIT_RESPONSE
-        self._close_deadline = monotonic_ms() + _SHUTDOWN_RESPONSE_MS
+        self._close_deadline_ms = monotonic_ms() + _SHUTDOWN_RESPONSE_MS
 
     def shutdown_poll(mut self) -> Bool:
         """Advance the close handshake. True once the transport can be torn
@@ -1963,7 +1963,7 @@ struct LspManager(Copyable, Movable):
                             == self._close_shutdown_id:
                     acked = True
                     break
-            if not acked and now < self._close_deadline:
+            if not acked and now < self._close_deadline_ms:
                 return False
             # Send ``exit`` whether or not the response arrived: an
             # unacknowledged shutdown is still better followed by exit than
@@ -1975,11 +1975,11 @@ struct LspManager(Copyable, Movable):
                 self._close_stage = _CLOSE_DONE
                 return True
             self._close_stage = _CLOSE_AWAIT_EXIT
-            self._close_deadline = monotonic_ms() + _SHUTDOWN_EXIT_MS
+            self._close_deadline_ms = monotonic_ms() + _SHUTDOWN_EXIT_MS
             return False
         # _CLOSE_AWAIT_EXIT: the reap check at the top is what completes
         # this; here we only enforce the budget.
-        if now >= self._close_deadline:
+        if now >= self._close_deadline_ms:
             self._close_stage = _CLOSE_DONE
             return True
         return False
@@ -2006,7 +2006,7 @@ struct LspManager(Copyable, Movable):
         self.state = _STATE_NOT_STARTED
         self._close_stage = _CLOSE_IDLE
         self._close_shutdown_id = String("")
-        self._close_deadline = 0
+        self._close_deadline_ms = 0
 
     def _leave_shared_channel(mut self):
         """Detach from a shared channel others still use: close our
@@ -3063,7 +3063,7 @@ struct LspManager(Copyable, Movable):
             String("codeAction/resolve"), raws, slots,
         )
         if self._ca_resolve.pending() > 0:
-            self._ca_resolve_deadline = \
+            self._ca_resolve_deadline_ms = \
                 monotonic_ms() + _CA_RESOLVE_TIMEOUT_MS
             if self._logging():
                 _lsp_debug_write(
@@ -3081,7 +3081,7 @@ struct LspManager(Copyable, Movable):
         var settled = self._ca_accum^
         self._ca_accum = List[CodeAction]()
         self._code_actions.publish(settled^)
-        self._ca_resolve_deadline = 0
+        self._ca_resolve_deadline_ms = 0
 
     def _expire_code_action_resolves(mut self):
         """Publish what we have if the resolves haven't come back in time.
@@ -3092,9 +3092,9 @@ struct LspManager(Copyable, Movable):
         already had inline edits) and the menu settles."""
         if self._ca_resolve.pending() == 0:
             return
-        if self._ca_resolve_deadline <= 0:
+        if self._ca_resolve_deadline_ms <= 0:
             return
-        if monotonic_ms() < self._ca_resolve_deadline:
+        if monotonic_ms() < self._ca_resolve_deadline_ms:
             return
         if self._logging():
             _lsp_debug_write(
@@ -4039,7 +4039,7 @@ struct LspManager(Copyable, Movable):
             # the encoding exists. No-op under ``utf-8``. Deliberately
             # after the initialize branch: the encoding isn't negotiated
             # until that response is handled, and it carries no positions.
-            if self._position_enc != POS_UTF8 and msg.result:
+            if self._position_encoding_tag != POS_UTF8 and msg.result:
                 var default_uri = self._take_req_uri(id)
                 self._from_wire(msg.result.value(), default_uri)
             if id == self._inflight_def_id:
@@ -5058,13 +5058,13 @@ struct LspManager(Copyable, Movable):
                 )
                 if enc_opt and enc_opt.value().is_string():
                     self._position_encoding = enc_opt.value().as_str()
-        self._position_enc = encoding_from_name(self._position_encoding)
-        self._remap.enc = self._position_enc
+        self._position_encoding_tag = encoding_from_name(self._position_encoding)
+        self._remap.enc = self._position_encoding_tag
         # Normalize the display string too, so an unrecognized value is
         # reported as the encoding we'll actually convert against rather
         # than as whatever the server claimed.
-        self._position_encoding = encoding_name(self._position_enc)
-        if self._position_enc != POS_UTF8:
+        self._position_encoding = encoding_name(self._position_encoding_tag)
+        if self._position_encoding_tag != POS_UTF8:
             if self._logging():
                 _lsp_debug_write(
                     String("position encoding negotiated as '")

@@ -24,7 +24,7 @@ from std.ffi import external_call
 
 from turbokod.posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, STDIN_FD, TCSANOW, TERMIOS_SIZE,
-    alloc_zero_buffer, cfmakeraw, poll_stdin,
+    alloc_zero_buffer, cfmakeraw, poll_readable,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
     posix_spawnp_call, tcgetattr, tcsetattr, waitpid_blocking,
 )
@@ -32,7 +32,7 @@ from turbokod.posix import (
 
 def _read_one_keypress(label: String) raises:
     print(label, "— press a key")
-    while not poll_stdin(STDIN_FD, Int32(1000)):
+    while not poll_readable(STDIN_FD, Int32(1000)):
         pass
     var buf = alloc_zero_buffer(64)
     var n = external_call["read", Int](STDIN_FD, buf.unsafe_ptr(), 64)

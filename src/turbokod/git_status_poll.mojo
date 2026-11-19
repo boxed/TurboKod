@@ -19,7 +19,7 @@ is exactly the case ``rev-list`` failed on before.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .git_changes import _git_argv
+from .git_changes import git_argv
 from .line_stream import LineStream
 from .string_utils import byte_slice
 
@@ -109,7 +109,7 @@ struct GitStatusPoller(Movable):
         # Default untracked mode: a wholly untracked directory is one row
         # rather than one per file. We only need to know whether there is
         # *any* row, and ``-uall`` walks the whole untracked tree to list it.
-        return self.stream.start(_git_argv(root, args^))
+        return self.stream.start(git_argv(root, args^))
 
     def cancel(mut self):
         """Stop the child (SIGTERM + reap + pipe close). Idempotent."""

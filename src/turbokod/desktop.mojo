@@ -33,7 +33,7 @@ from .case_fold import eq_ci, fold_byte
 from .json import JsonValue, json_null
 from .output_links import OutputLink
 from .canvas import (
-    Canvas, HOST_SURFACES, HostItem, SCALE_ONE, SubGrid, utf8_codepoint_count,
+    Canvas, HOST_SURFACES, HostItem, SCALE_ONE, SubGrid,
 )
 from .cell import Cell, FONT_CODE, FONT_SLOTS, FONT_UI
 from .painter import Painter
@@ -226,7 +226,7 @@ from .string_utils import (
     byte_slice, display_columns, parse_int_prefix, parse_uint_range,
     split_lines_no_trailing,
     shell_command, shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
-    fnv_int, fnv_start, fnv_str,
+    fnv_int, fnv_start, fnv_str, text_cells,
 )
 from .session_store import (
     Session, SessionWindow, StoredWindow,
@@ -1851,7 +1851,7 @@ struct Desktop(Movable):
     """Which rows of the open picker's list the projectors are sent."""
     var _picker_code_window: ListWindow
     """Which lines of Find in Project's code view they're sent."""
-    var _picker_open: String
+    var _picker_windows_kind: String
     """The picker kind the windows are for; another one resets them."""
     # Per-user window session, persisted in
     # ``<project>/.turbokod/per_user/<username>/session.json``.
@@ -2225,7 +2225,7 @@ struct Desktop(Movable):
         self._last_screen = Rect.empty()
         self._picker_window = ListWindow()
         self._picker_code_window = ListWindow()
-        self._picker_open = String("")
+        self._picker_windows_kind = String("")
         self.run_session = RunSession()
         self._run_output_held = False
         self.test_pane = TestPane()
@@ -8539,9 +8539,9 @@ struct Desktop(Movable):
         var clicked_window = self.windows.handle_mouse(
             event, self.workspace_rect(screen)
         )
-        if self.windows.close_requested >= 0:
-            var idx = self.windows.close_requested
-            self.windows.close_requested = -1
+        if self.windows.close_requested_idx >= 0:
+            var idx = self.windows.close_requested_idx
+            self.windows.close_requested_idx = -1
             self._close_window_keeping_work(idx)
         if clicked_window and event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
@@ -10201,8 +10201,8 @@ struct Desktop(Movable):
     def picker_ui(mut self) -> UINode:
         """The open picker as a ``picker_dialog``."""
         var kind = self.picker_kind()
-        if kind != self._picker_open:
-            self._picker_open = kind
+        if kind != self._picker_windows_kind:
+            self._picker_windows_kind = kind
             self._picker_window.reset()
             self._picker_code_window.reset()
         var count = self._picker_count()
@@ -11970,7 +11970,7 @@ struct Desktop(Movable):
             return
         if self.windows.windows[win_idx].editor.completion_is_message:
             return
-        var hl = self.windows.windows[win_idx].editor.completion_highlight
+        var hl = self.windows.windows[win_idx].editor.completion_selected
         if hl < 0 \
                 or hl >= len(self.windows.windows[win_idx].editor.completion_items):
             return
@@ -14384,7 +14384,7 @@ struct Desktop(Movable):
         # LSP character offsets count UTF-16 units, not bytes; a codepoint
         # count matches for the BMP identifiers this handles (byte length
         # over-counts a multi-byte identifier and mis-triggers references).
-        var span = utf8_codepoint_count(origin_word)
+        var span = text_cells(origin_word)
         if span <= 0:
             span = 1
         return origin_char >= target.character \

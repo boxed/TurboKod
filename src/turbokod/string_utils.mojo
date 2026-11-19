@@ -660,7 +660,7 @@ def is_word_codepoint(cp: Int) -> Bool:
     return False
 
 
-def is_space_cp(cp: Int) -> Bool:
+def is_space_codepoint(cp: Int) -> Bool:
     """``True`` for an inline whitespace codepoint (space or tab). Used by
     word-movement to skip whitespace without treating it as a token."""
     return cp == 0x20 or cp == 0x09
@@ -729,7 +729,7 @@ def next_token_end(line: String, col: Int) -> Int:
     var c = max(col, 0)
     while c < n:
         var info = codepoint_at(line, c)
-        if not is_space_cp(info[0]):
+        if not is_space_codepoint(info[0]):
             break
         c += info[1]
     if c >= n:
@@ -757,7 +757,7 @@ def prev_token_start(line: String, col: Int) -> Int:
     var c = min(col, len(line.as_bytes()))
     while c > 0:
         var prev = prev_codepoint_start(line, c)
-        if not is_space_cp(codepoint_at(line, prev)[0]):
+        if not is_space_codepoint(codepoint_at(line, prev)[0]):
             break
         c = prev
     if c <= 0:

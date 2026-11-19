@@ -1460,9 +1460,9 @@ struct Editor(Copyable, Movable):
     # ``max_scroll_y`` under wrap, cached by ``clamp_scroll`` (every frame,
     # for every editor) against what it depends on, so the scroll bar's
     # call in the same frame and the frames after it don't re-wrap the
-    # buffer's last screenful again. ``_max_sy < 0``: nothing cached.
-    var _max_sy: Int
-    var _max_sy_key: _WrapKey
+    # buffer's last screenful again. ``_max_scroll_y_cache < 0``: nothing cached.
+    var _max_scroll_y_cache: Int
+    var _max_scroll_y_key: _WrapKey
     # ``longest_line_width``, -1 until measured or after an edit: it
     # measures every line, and the scroll bar wants it every frame.
     var _longest_w: Int
@@ -1704,8 +1704,8 @@ struct Editor(Copyable, Movable):
     the text."""
     var _lsp_text: String
     """``lsp_text``'s cached snapshot, valid while ``change_count`` still
-    equals ``_lsp_text_count`` (-1: none yet)."""
-    var _lsp_text_count: Int
+    equals ``_lsp_text_change_count`` (-1: none yet)."""
+    var _lsp_text_change_count: Int
     var pending_test_run: Optional[TestRunRequest]
     # pytest ``python_files`` globs for this buffer's project (e.g.
     # ``test_*.py``, ``*__tests.py``, ``helpers.py``). Pushed by the host
@@ -2067,7 +2067,7 @@ struct Editor(Copyable, Movable):
     var inline_completion_col: Int
     var completion_popup_visible: Bool
     var completion_items: List[CompletionItem]
-    var completion_highlight: Int
+    var completion_selected: Int
     var completion_scroll: Int
     var completion_anchor_row: Int
     var completion_anchor_col: Int
@@ -2127,8 +2127,8 @@ struct Editor(Copyable, Movable):
         self._vis_w = -1
         self._vis_mode = -1
         self._vis_dirty = True
-        self._max_sy = -1
-        self._max_sy_key = _WrapKey(0, 0, 0, 0, 0)
+        self._max_scroll_y_cache = -1
+        self._max_scroll_y_key = _WrapKey(0, 0, 0, 0, 0)
         self._longest_w = -1
         self._suppress_overlays = False
         self.host_owns_shadows = False
@@ -2183,7 +2183,7 @@ struct Editor(Copyable, Movable):
         self._tests_dirty = True
         self.change_count = 0
         self._lsp_text = String("")
-        self._lsp_text_count = -1
+        self._lsp_text_change_count = -1
         self.pending_test_run = Optional[TestRunRequest]()
         self.test_file_globs = List[String]()
         self.merge_pending = False
@@ -2261,7 +2261,7 @@ struct Editor(Copyable, Movable):
         self.inline_completion_col = 0
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
-        self.completion_highlight = 0
+        self.completion_selected = 0
         self.completion_scroll = 0
         self.completion_anchor_row = 0
         self.completion_anchor_col = 0
@@ -3106,7 +3106,7 @@ struct Editor(Copyable, Movable):
         self._highlights_dirty = True
         self._hl_dirty_row = 0
         # The language (so smart wrap) may have changed with the path.
-        self._max_sy = -1
+        self._max_scroll_y_cache = -1
 
     def _mark_hl_dirty(mut self, row: Int, max_row: Int = -1):
         """Note that ``row`` (and possibly later rows) need
@@ -3741,7 +3741,7 @@ struct Editor(Copyable, Movable):
         host's ``cancel_completion`` is a no-op in that case)."""
         self.completion_popup_visible = False
         self.completion_items = List[CompletionItem]()
-        self.completion_highlight = 0
+        self.completion_selected = 0
         self.completion_scroll = 0
         self.completion_is_message = False
         self.pending_completion_request = Optional[CompletionRequest]()
@@ -3769,7 +3769,7 @@ struct Editor(Copyable, Movable):
             return
         self.completion_items = items^
         self.completion_popup_visible = True
-        self.completion_highlight = 0
+        self.completion_selected = 0
         self.completion_scroll = 0
         self.completion_anchor_row = anchor_row
         self.completion_anchor_col = anchor_col
@@ -3816,7 +3816,7 @@ struct Editor(Copyable, Movable):
         )
         self.completion_items = items^
         self.completion_popup_visible = True
-        self.completion_highlight = 0
+        self.completion_selected = 0
         self.completion_scroll = 0
         self.completion_anchor_row = anchor_row
         self.completion_anchor_col = anchor_col
@@ -3957,14 +3957,14 @@ struct Editor(Copyable, Movable):
         if self.read_only:
             self.close_completion_popup()
             return False
-        if self.completion_highlight < 0 \
-                or self.completion_highlight >= len(self.completion_items):
+        if self.completion_selected < 0 \
+                or self.completion_selected >= len(self.completion_items):
             self.close_completion_popup()
             return False
         if self.completion_anchor_row != self.selections[0].row:
             self.close_completion_popup()
             return False
-        var item = self.completion_items[self.completion_highlight].copy()
+        var item = self.completion_items[self.completion_selected].copy()
         var pre = self.selections[0].row
         var line = self.buffer.line(self.selections[0].row)
         var ln = len(line.as_bytes())
@@ -4039,21 +4039,21 @@ struct Editor(Copyable, Movable):
         var n = len(self.completion_items)
         if n == 0:
             return
-        var i = self.completion_highlight + delta
+        var i = self.completion_selected + delta
         if i < 0:
             i = 0
         elif i >= n:
             i = n - 1
-        self.completion_highlight = i
+        self.completion_selected = i
         # Keep the highlight in view. Popup renders _COMPLETION_POPUP_ROWS
         # rows at a time; scroll the window when the highlight steps
         # outside it.
-        if self.completion_highlight < self.completion_scroll:
-            self.completion_scroll = self.completion_highlight
-        elif self.completion_highlight \
+        if self.completion_selected < self.completion_scroll:
+            self.completion_scroll = self.completion_selected
+        elif self.completion_selected \
                 >= self.completion_scroll + _COMPLETION_POPUP_ROWS:
             self.completion_scroll = (
-                self.completion_highlight - _COMPLETION_POPUP_ROWS + 1
+                self.completion_selected - _COMPLETION_POPUP_ROWS + 1
             )
 
     def consume_spell_action_request(
@@ -4855,9 +4855,9 @@ struct Editor(Copyable, Movable):
         through ``_mark_hl_dirty`` — so this is only for the live-editing
         paths, never for code that rewrites ``buffer.lines`` directly.
         """
-        if self._lsp_text_count != self.change_count:
+        if self._lsp_text_change_count != self.change_count:
             self._lsp_text = self.text_snapshot()
-            self._lsp_text_count = self.change_count
+            self._lsp_text_change_count = self.change_count
         return self._lsp_text
 
     def _disk_text(self) -> String:
@@ -6207,7 +6207,7 @@ struct Editor(Copyable, Movable):
                 break
             var ty = rect.a.y + r
             var item = self.completion_items[idx].copy()
-            var is_hl = (idx == self.completion_highlight)
+            var is_hl = (idx == self.completion_selected)
             var row_attr = sel_attr if is_hl else attr
             if is_hl:
                 # Selection spans the left pad, label area, and the
@@ -6837,7 +6837,7 @@ struct Editor(Copyable, Movable):
         redundant ``name=name`` call arguments concealed via
         ``kwarg_conceal``. Every other row — and every row when the feature is
         off or the language has no keyword-arg separator — falls back to the
-        raw slice + ``utf8_byte_to_cell``, so the caller can index the arrays
+        raw slice + ``utf8_byte_cell_map``, so the caller can index the arrays
         unconditionally. String/comment spans are read from the row's syntax
         highlights so separators inside literals never trigger a match.
 
@@ -7271,10 +7271,10 @@ struct Editor(Copyable, Movable):
         # ("<sha> <author>"). Any of them can be zero-width.
         var g = self._gutters()
         var dap_gutter = g.dap
-        var ln_gutter = g.line_numbers
-        var gc_gutter = g.git
-        var bl_gutter = g.blame
-        var tst_gutter = g.test
+        var line_number_gutter = g.line_numbers
+        var git_gutter = g.git
+        var blame_gutter = g.blame
+        var test_gutter = g.test
         var right_gutter = self._right_gutter()
         var total_gutter = g.total()
         var text_x0 = view.a.x + total_gutter
@@ -7320,7 +7320,7 @@ struct Editor(Copyable, Movable):
                 if marked:
                     # Bookmark: a block behind the number, leaving the
                     # separator column (the whole cell with no numbers).
-                    for gx in range(max(ln_gutter - 1, 1)):
+                    for gx in range(max(line_number_gutter - 1, 1)):
                         painter.set(
                             canvas, view.a.x + gx, sy_g,
                             Cell(String(" "), _bookmark_attr(), 1),
@@ -7330,7 +7330,7 @@ struct Editor(Copyable, Movable):
                     var num_w = len(num_str.as_bytes())
                     # Right-align inside the line-number gutter, leaving
                     # the trailing column as a one-cell separator.
-                    var sx = view.a.x + (ln_gutter - 1) - num_w
+                    var sx = view.a.x + (line_number_gutter - 1) - num_w
                     if sx < view.a.x:
                         sx = view.a.x
                     _ = painter.put_text(
@@ -7364,7 +7364,7 @@ struct Editor(Copyable, Movable):
                         var ax = view.a.x + g.dap_x() \
                             + (1 if dap_gutter >= 2 else 0)
                         painter.set(canvas, ax, sy_g, Cell(String("▶"), exec_attr, 1))
-                if gc_gutter > 0 and is_first_seg \
+                if git_gutter > 0 and is_first_seg \
                         and buf_row >= 0 \
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
@@ -7392,16 +7392,16 @@ struct Editor(Copyable, Movable):
                             canvas, gx, sy_g,
                             Cell(String("_"), Attr(LIGHT_RED, EDITOR_BG), 1),
                         )
-                if bl_gutter > 0 and is_first_seg \
+                if blame_gutter > 0 and is_first_seg \
                         and buf_row >= 0 \
                         and buf_row < len(self.blame_lines):
                     var bl = self.blame_lines[buf_row]
                     var bx = view.a.x + g.blame_x()
-                    # Blame columns: clip to ``[bx, bx + bl_gutter)``
+                    # Blame columns: clip to ``[bx, bx + blame_gutter)``
                     # via a sub-painter so a long author/commit can't
                     # bleed into the source text column.
                     var bl_p = painter.sub(
-                        Rect(bx, sy_g, bx + bl_gutter, sy_g + 1),
+                        Rect(bx, sy_g, bx + blame_gutter, sy_g + 1),
                     )
                     _ = bl_p.put_text(
                         canvas, Point(bx, sy_g), bl.commit, ln_attr,
@@ -7413,7 +7413,7 @@ struct Editor(Copyable, Movable):
                 # Test run-icon: green ▶ at the right end of the gutter
                 # (just left of the text) on each detected-test row. Green
                 # distinguishes it from the yellow exec-arrow above.
-                if tst_gutter > 0 and is_first_seg:
+                if test_gutter > 0 and is_first_seg:
                     for k in range(len(self.test_rows)):
                         if self.test_rows[k] == buf_row:
                             var tx = view.a.x + g.test_x()
@@ -7964,7 +7964,7 @@ struct Editor(Copyable, Movable):
                     # Line number, right-aligned in the line-number gutter.
                     var marked = self.buffer.is_marked(brow)
                     if marked:
-                        for gx in range(max(ln_gutter - 1, 1)):
+                        for gx in range(max(line_number_gutter - 1, 1)):
                             painter.set(
                                 canvas, view.a.x + gx, sy,
                                 Cell(String(" "), _bookmark_attr(), 1),
@@ -7972,7 +7972,7 @@ struct Editor(Copyable, Movable):
                     if self.line_numbers:
                         var num_str = String(brow + 1)
                         var num_w = len(num_str.as_bytes())
-                        var nx = view.a.x + (ln_gutter - 1) - num_w
+                        var nx = view.a.x + (line_number_gutter - 1) - num_w
                         if nx < view.a.x:
                             nx = view.a.x
                         _ = painter.put_text(
@@ -11010,9 +11010,9 @@ struct Editor(Copyable, Movable):
             var m = n_lines - content_h
             return 0 if m < 0 else m
         var content_w = self._content_width(view)
-        if self._max_sy >= 0 \
-                and self._max_sy_key == self._wrap_key(content_h, content_w):
-            return self._max_sy
+        if self._max_scroll_y_cache >= 0 \
+                and self._max_scroll_y_key == self._wrap_key(content_h, content_w):
+            return self._max_scroll_y_cache
         # Measure each line with the SAME wrap routine ``_layout_lines``
         # paints with, or the scrollbar/wheel range desyncs from what's on
         # screen.
@@ -11219,8 +11219,8 @@ struct Editor(Copyable, Movable):
                 self.scroll_x = utf8_byte_of_cell(line, cell)
         var max_y = self.max_scroll_y(view)
         if self._is_wrapping():
-            self._max_sy = max_y
-            self._max_sy_key = self._wrap_key(
+            self._max_scroll_y_cache = max_y
+            self._max_scroll_y_key = self._wrap_key(
                 view.height(), self._content_width(view),
             )
         var prev_scroll_y = self.scroll_y

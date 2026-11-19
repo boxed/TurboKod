@@ -14,7 +14,7 @@ This module is pure data (no TTY / AppKit) so it's unit-testable directly:
 * ``kwarg_conceal_ranges`` — byte ranges of a line to hide.
 * ``build_concealed_segment`` — turn a visible byte-slice + its hide ranges
   into the painted string plus a ``byte → cell`` map (the holed analogue of
-  ``utf8_byte_to_cell``), so every existing overlay pass keeps aligning.
+  ``utf8_byte_cell_map``), so every existing overlay pass keeps aligning.
 
 Detection is deliberately conservative (see ``kwarg_conceal_ranges``): the
 label is hidden only when it is byte-identical to a bare-identifier value, the
@@ -184,7 +184,7 @@ def build_concealed_segment(
     identical-to marker, or ``""`` to keep the original separator byte.
 
     Returns ``(display, byte_to_cell, cell_count)``. ``byte_to_cell`` has one
-    entry per byte of ``seg`` (matching ``utf8_byte_to_cell``'s contract) so
+    entry per byte of ``seg`` (matching ``utf8_byte_cell_map``'s contract) so
     overlay passes can index it by raw buffer byte: hidden bytes collapse to
     the current display cell (zero width), visible codepoints advance it. The
     separator byte keeps its single ``byte_to_cell`` entry and advances one

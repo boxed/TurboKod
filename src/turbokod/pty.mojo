@@ -19,9 +19,9 @@ the Rust shim (``app/turbokod-shim``) — see ``tk_pty_spawn`` for why we don't 
 from std.collections.list import List
 from std.ffi import external_call
 
-from .lsp import _build_argv_buffer
+from .lsp import build_argv_buffer
 from .posix import (
-    close_fd, kill_pid, poll_stdin, reap_child, SIGTERM, untrack_child,
+    close_fd, kill_pid, poll_readable, reap_child, SIGTERM, untrack_child,
     waitpid_nohang,
 )
 
@@ -90,7 +90,7 @@ struct PtyProcess(Copyable, Movable):
         # Same idiom as ``LspProcess.spawn`` so the lifetime semantics
         # are identical: keep ``argv_buf`` alive until after the
         # external_call returns.
-        var argv_buf = _build_argv_buffer(argv)
+        var argv_buf = build_argv_buffer(argv)
         # Out-params for the shim. We pass two distinct buffers — one
         # for the pid, one for the master fd — rather than a single
         # 8-byte buffer with two pointers into it because Mojo's borrow
@@ -131,7 +131,7 @@ struct PtyProcess(Copyable, Movable):
         Never once ``alive`` is off: a hung-up master polls readable for
         as long as it stays open."""
         return self.alive and self.master_fd >= 0 \
-            and poll_stdin(self.master_fd, 0)
+            and poll_readable(self.master_fd, 0)
 
     def set_winsize(self, cols: Int, rows: Int) -> Int:
         """Re-send window size to the kernel. The child gets a

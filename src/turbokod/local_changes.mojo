@@ -93,7 +93,7 @@ three-way choice is made.
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow, utf8_byte_to_cell, utf8_codepoint_count
+from .canvas import Canvas, paint_drop_shadow, utf8_byte_cell_map
 from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
@@ -147,6 +147,7 @@ from .string_utils import (
     fnv32,
     is_ascii_digit,
     parse_uint_range,
+    text_cells,
     split_lines,
     split_lines_no_trailing,
     starts_with,
@@ -3751,7 +3752,7 @@ struct LocalChanges(Movable):
             _ = painter.put_text(canvas, Point(body_x, y), line, line_attr)
             # Syntax-highlight overlay. Highlights' columns are *byte*
             # offsets in the line text (the same convention the editor
-            # uses); we run them through ``utf8_byte_to_cell`` to land
+            # uses); we run them through ``utf8_byte_cell_map`` to land
             # on the right visual columns when a line contains
             # multi-byte UTF-8. ``-`` rows pull from the before-file
             # tokenization, ``+`` and context rows pull from the
@@ -3760,9 +3761,9 @@ struct LocalChanges(Movable):
             var hl_lo = panel.hl_row_start[idx] if hl_ready else 0
             var hl_hi = panel.hl_row_start[idx + 1] if hl_ready else 0
             if has_gutter and hl_hi > hl_lo:
-                var byte_to_cell = utf8_byte_to_cell(line)
+                var byte_to_cell = utf8_byte_cell_map(line)
                 var byte_count = len(line.as_bytes())
-                var cell_count = utf8_codepoint_count(line)
+                var cell_count = text_cells(line)
                 for hi in range(hl_lo, hl_hi):
                     var hl = panel.highlights[hi]
                     var hl_byte_lo = max(hl.col_start, 0)

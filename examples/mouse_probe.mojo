@@ -14,7 +14,7 @@ Run with::
 
 from turbokod.posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
-    alloc_zero_buffer, cfmakeraw, poll_stdin, read_into,
+    alloc_zero_buffer, cfmakeraw, poll_readable, read_into,
     tcgetattr, tcsetattr, write_string,
 )
 
@@ -154,7 +154,7 @@ def main() raises:
     var quit = False
     try:
         while not quit:
-            if not poll_stdin(STDIN_FD, Int32(200)):
+            if not poll_readable(STDIN_FD, Int32(200)):
                 continue
             var n = read_into(STDIN_FD, buf, 256)
             if n <= 0:

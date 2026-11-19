@@ -329,14 +329,14 @@ struct Canvas(Copyable, Movable):
         right of the line-number gutter — must pass the column where the
         text begins, or a leading tab expands by however many cells happen
         to remain to the next absolute stop (e.g. 2 instead of 4) while the
-        cursor's column model (``utf8_byte_to_cell``, which counts from the
+        cursor's column model (``utf8_byte_cell_map``, which counts from the
         line start) says 4. ``Painter.put_text`` passes the paint origin so
         every editor / tool-pane paint is tab-aligned to its own left edge.
 
         Codepoint-aligned: each codepoint occupies one cell carrying the
         full UTF-8 byte sequence as its glyph string. Callers that hold
         byte indices (the editor's overlay paths) need
-        ``utf8_byte_to_cell`` to translate. Wide codepoints — emoji, CJK
+        ``utf8_byte_cell_map`` to translate. Wide codepoints — emoji, CJK
         (``char_width`` == 2) — occupy two cells: the glyph cell carries
         ``width=2`` and is followed by an empty ``width=0`` continuation
         cell so the frontends know to skip the right half. A wide glyph
@@ -768,7 +768,7 @@ struct RunCells(Copyable, Movable):
         return self.byte_start + len(self.cells)
 
 
-def utf8_byte_to_cell(text: String) -> List[Int]:
+def utf8_byte_cell_map(text: String) -> List[Int]:
     """Map every byte index in ``text`` to the cell column its codepoint
     occupies under ``Canvas.put_text``'s codepoint-aligned layout.
 
@@ -790,7 +790,7 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
 
 
 def utf8_cell_map(text: String, mut out: List[Int]) -> Int:
-    """``utf8_byte_to_cell`` and ``text_cells`` in one pass:
+    """``utf8_byte_cell_map`` and ``text_cells`` in one pass:
     appends ``text``'s byte → cell map to ``out`` and returns the cell
     count — the pair every overlay wants, which otherwise walks the
     text twice."""
@@ -818,10 +818,3 @@ def utf8_cell_map(text: String, mut out: List[Int]) -> Int:
         cell += char_width(codepoint_at(text, i)[0])
         i += seq_len
     return cell
-
-
-def utf8_codepoint_count(text: String) -> Int:
-    """Number of cells ``Canvas.put_text(text)`` would produce — cells,
-    not codepoints, despite the name: the older spelling of
-    ``text_cells``, which new code should call."""
-    return text_cells(text)

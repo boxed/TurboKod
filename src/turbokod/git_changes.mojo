@@ -596,7 +596,7 @@ def fetch_blob_text(
     return _git_stdout(project_root, args^)
 
 
-def _git_argv(project_root: String, var args: List[String]) -> List[String]:
+def git_argv(project_root: String, var args: List[String]) -> List[String]:
     """Build ``git --no-optional-locks -C <project_root> <args...>`` — the
     prefix every git invocation in this module shares.
 
@@ -627,7 +627,7 @@ def _git_argv(project_root: String, var args: List[String]) -> List[String]:
 def git_base_argv(project_root: String) -> List[String]:
     """``git --literal-pathspecs --no-optional-locks -C <project_root>``:
     the one spelling of the prefix every git invocation in the product
-    starts with (see ``_git_argv`` for why each flag is there)."""
+    starts with (see ``git_argv`` for why each flag is there)."""
     var argv = string_list(
         String("git"), String("--literal-pathspecs"), String("--no-optional-locks"),
         String("-C"), project_root,
@@ -642,7 +642,7 @@ def _git_capture(
     """Run ``git -C <root> <args...>`` (optionally feeding ``stdin_text``);
     stdout on success, empty on a non-zero exit or spawn failure."""
     try:
-        var r = capture_command(_git_argv(project_root, args^), stdin_text)
+        var r = capture_command(git_argv(project_root, args^), stdin_text)
         if Int(r.status) != 0:
             return None
         return r.stdout
@@ -968,7 +968,7 @@ def compute_untracked_diff(project_root: String, rel_path: String) -> String:
         String("/dev/null"), rel_path,
     )
     try:
-        return capture_command(_git_argv(project_root, args^)).stdout
+        return capture_command(git_argv(project_root, args^)).stdout
     except:
         return String("")
 
@@ -1023,7 +1023,7 @@ def _git_status_args() -> List[String]:
 def git_status_argv(project_root: String) -> List[String]:
     """The whole command line ``fetch_git_status`` runs, for running it
     without waiting (``parse_git_status`` reads what it prints)."""
-    return _git_argv(project_root, _git_status_args())
+    return git_argv(project_root, _git_status_args())
 
 
 def parse_git_status(stdout: String) -> List[GitFileStatus]:

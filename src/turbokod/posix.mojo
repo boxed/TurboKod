@@ -92,7 +92,7 @@ def alloc_zero_buffer(n: Int) -> List[UInt8]:
     return List[UInt8](length=n, fill=0)
 
 
-comptime DRAIN_MORE = 0   # nothing more ready, or the cap was reached
+comptime DRAIN_OPEN = 0   # nothing more ready, or the cap was reached
 comptime DRAIN_EOF = 1    # ``read`` returned 0: the other end closed
 comptime DRAIN_ERROR = -1  # ``read`` failed
 
@@ -108,8 +108,8 @@ def drain_fd(
     its own copy of this loop, each allocating (and zeroing) its scratch
     buffer on every tick whether or not the fd had anything to read. This
     polls first, so an idle tick allocates nothing."""
-    if fd < 0 or not poll_stdin(fd, Int32(0)):
-        return (0, DRAIN_MORE)
+    if fd < 0 or not poll_readable(fd, Int32(0)):
+        return (0, DRAIN_OPEN)
     var total = 0
     while total < cap:
         var n = read_append(fd, out, chunk)
@@ -118,9 +118,9 @@ def drain_fd(
         if n < 0:
             return (total, DRAIN_ERROR)
         total += n
-        if not poll_stdin(fd, Int32(0)):
+        if not poll_readable(fd, Int32(0)):
             break
-    return (total, DRAIN_MORE)
+    return (total, DRAIN_OPEN)
 
 
 def drain_fd_string(fd: Int32, cap: Int = 65536) -> String:
@@ -199,7 +199,7 @@ def wall_clock_ms() -> Int:
 # --- I/O multiplexing -------------------------------------------------------
 
 
-def poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
+def poll_readable(fd: Int32, timeout_ms: Int32) -> Bool:
     """Return True if ``fd`` has data ready within ``timeout_ms``.
 
     We poll exactly one fd asking for POLLIN, so ``n > 0`` from poll already
@@ -1067,7 +1067,7 @@ def query_size_via_cursor(fd_in: Int32, fd_out: Int32, timeout_ms: Int32 = 500) 
     Returns ``(0, 0)`` if the terminal doesn't reply within ``timeout_ms``.
     """
     write_string(fd_out, String("\x1b7\x1b[9999;9999H\x1b[6n"))
-    if not poll_stdin(fd_in, timeout_ms):
+    if not poll_readable(fd_in, timeout_ms):
         write_string(fd_out, String("\x1b8"))
         return (0, 0)
     var buf = alloc_zero_buffer(64)

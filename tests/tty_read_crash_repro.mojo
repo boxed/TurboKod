@@ -25,7 +25,7 @@ from std.ffi import external_call
 
 from turbokod.posix import (
     STDIN_FD, TCSANOW, TERMIOS_SIZE,
-    alloc_zero_buffer, cfmakeraw, pipe_pair, poll_stdin,
+    alloc_zero_buffer, cfmakeraw, pipe_pair, poll_readable,
     tcgetattr, tcsetattr, write_buffer,
 )
 
@@ -62,7 +62,7 @@ def main() raises:
                 pipe_r, pipe_buf.unsafe_ptr(), 1024,
             )
             # Stdin: poll then read.
-            if poll_stdin(STDIN_FD, Int32(50)):
+            if poll_readable(STDIN_FD, Int32(50)):
                 var sn = external_call["read", Int](
                     STDIN_FD, stdin_buf.unsafe_ptr(), 1024,
                 )

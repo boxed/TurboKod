@@ -1264,7 +1264,7 @@ def test_editor_set_completions_opens_popup() raises:
     ed.set_completions(items^, 0, 0)
     assert_true(ed.completion_popup_visible)
     assert_equal(len(ed.completion_items), 2)
-    assert_equal(ed.completion_highlight, 0)
+    assert_equal(ed.completion_selected, 0)
     ed.close_completion_popup()
     assert_false(ed.completion_popup_visible)
     # Empty list is treated as "close" — no stale state lingers.
@@ -1332,7 +1332,7 @@ def test_editor_show_no_completion_message_opens_unselectable_popup() raises:
     )
     # Arrow keys are no-ops on a message popup.
     ed._completion_step(1)
-    assert_equal(ed.completion_highlight, 0)
+    assert_equal(ed.completion_selected, 0)
     # Enter dismisses, does not insert anything.
     var ok = ed.accept_completion()
     assert_true(ok)

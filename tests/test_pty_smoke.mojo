@@ -23,7 +23,7 @@ from std.collections.list import List
 from std.testing import TestSuite, assert_equal, assert_true
 
 from turbokod.posix import (
-    alloc_zero_buffer, getenv_value, poll_stdin, read_into, setenv_value,
+    alloc_zero_buffer, getenv_value, poll_readable, read_into, setenv_value,
     sleep_ms, waitpid_nohang,
 )
 from turbokod.pty import PtyProcess
@@ -40,7 +40,7 @@ def _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
     var scratch = alloc_zero_buffer(4096)
     var waited = 0
     while waited < deadline_ms:
-        var got_data = poll_stdin(pty.master_fd, Int32(20))
+        var got_data = poll_readable(pty.master_fd, Int32(20))
         if got_data:
             var n = read_into(pty.master_fd, scratch, 4096)
             if n > 0:
@@ -55,7 +55,7 @@ def _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
         if Int(pair[0]) == Int(pty.pid):
             # Drain one more time in case bytes landed between read
             # and waitpid (the pty's kernel buffer survives the child).
-            while poll_stdin(pty.master_fd, Int32(0)):
+            while poll_readable(pty.master_fd, Int32(0)):
                 var n2 = read_into(pty.master_fd, scratch, 4096)
                 if n2 <= 0: break
                 var span2 = Span[UInt8, origin_of(scratch)](
@@ -124,7 +124,7 @@ def _wait_for_output(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
     var waited = 0
     while waited < deadline_ms:
         pty.flush()
-        if poll_stdin(pty.master_fd, Int32(20)):
+        if poll_readable(pty.master_fd, Int32(20)):
             var n = read_into(pty.master_fd, scratch, 4096)
             if n > 0:
                 vt.feed(Span[UInt8, origin_of(scratch)](
@@ -159,7 +159,7 @@ def test_pty_input_beyond_the_kernel_queue_is_delivered_whole() raises:
     var done = False
     while waited < 5000 and not done:
         pty.flush()
-        if poll_stdin(pty.master_fd, Int32(20)):
+        if poll_readable(pty.master_fd, Int32(20)):
             var n = read_into(pty.master_fd, scratch, 4096)
             if n > 0:
                 vt.feed(Span[UInt8, origin_of(scratch)](
@@ -169,7 +169,7 @@ def test_pty_input_beyond_the_kernel_queue_is_delivered_whole() raises:
         if Int(pair[0]) == Int(pty.pid):
             done = True
         waited += 20
-    while poll_stdin(pty.master_fd, Int32(0)):
+    while poll_readable(pty.master_fd, Int32(0)):
         var n2 = read_into(pty.master_fd, scratch, 4096)
         if n2 <= 0:
             break
@@ -304,7 +304,7 @@ def test_pty_terminate_after_the_child_exited_on_its_own() raises:
     var spins = 0
     while p.alive and spins < 5000:
         spins += 1
-        if not poll_stdin(p.master_fd, Int32(20)):
+        if not poll_readable(p.master_fd, Int32(20)):
             continue
         var n = read_into(p.master_fd, scratch, 4096)
         if n <= 0:

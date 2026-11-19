@@ -1023,7 +1023,7 @@ struct TextLog(Copyable, Movable):
     var last_x_max: Int
     var last_first_visual: Int
     var last_visible_count: Int
-    var _open: Bool
+    var _last_line_open: Bool
     """True iff the last line was written by a ``streaming`` append that
     didn't end in ``\\n`` — i.e. it's an unterminated line still being
     built up byte-by-byte. The next streaming append continues it
@@ -1040,7 +1040,7 @@ struct TextLog(Copyable, Movable):
     re-running ``wrap_lines`` over the full backlog. Without this the
     maximized DebugPane re-wrapped its full 500-line stderr backlog
     every frame at ~210 cols and paint cost ~200 ms, which kept the
-    main loop from ever hitting its idle-blocking ``poll_stdin``
+    main loop from ever hitting its idle-blocking ``poll_readable``
     timeout — CPU pegged at 100 % until the pane was un-maximized."""
 
     def __init__(out self, default_attr: Attr, max_lines: Int = 500):
@@ -1064,7 +1064,7 @@ struct TextLog(Copyable, Movable):
         self.last_x_max = 0
         self.last_first_visual = 0
         self.last_visible_count = 0
-        self._open = False
+        self._last_line_open = False
         self._layout_w = -1
 
     # --- mutation -------------------------------------------------------
@@ -1084,7 +1084,7 @@ struct TextLog(Copyable, Movable):
         next streaming append continues it. The latter is what keeps
         pytest's progress dots — which arrive as separate read chunks
         with no newline between them — on one line instead of one dot
-        per row. See ``_open``."""
+        per row. See ``_last_line_open``."""
         var resolved = self.default_attr
         if attr:
             resolved = attr.value()
@@ -1103,7 +1103,7 @@ struct TextLog(Copyable, Movable):
             return
         # The first emitted segment continues the previous open line
         # only when both that line and this append are streaming.
-        var continue_open = streaming and self._open and len(self.lines) > 0
+        var continue_open = streaming and self._last_line_open and len(self.lines) > 0
         # ...and only while that line is under the cap: output with no
         # newline in it (a ``\\r`` progress bar redrawing itself for an
         # hour) would otherwise grow one line without bound — ``max_lines``
@@ -1134,7 +1134,7 @@ struct TextLog(Copyable, Movable):
         # Line stays "open" only for a streaming chunk that didn't end
         # on a newline; anything else closes the current row so a later
         # streaming append starts fresh rather than gluing onto it.
-        self._open = streaming and b[len(b) - 1] != 0x0A
+        self._last_line_open = streaming and b[len(b) - 1] != 0x0A
 
     def _extend_last(mut self, var seg: String, var runs: List[ColorRun]):
         """Glue ``seg`` onto the last (open) line in place, keeping the
@@ -1180,7 +1180,7 @@ struct TextLog(Copyable, Movable):
         self.scroll = 0
         self.autoscroll = True
         self.last_visual = List[VisualLine]()
-        self._open = False
+        self._last_line_open = False
         self._layout_w = -1
 
     def _push_line(mut self, var line: String, attr: Attr,

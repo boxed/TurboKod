@@ -251,7 +251,7 @@ struct LspChannel(Movable):
     var dead: Bool
     # The session that last sent the server anything — the window the user
     # is working in. Where a message naming no document goes.
-    var _last_active: Int
+    var _last_active_session: Int
 
     def __init__(out self, var client: LspClient, key: String):
         self.client = client^
@@ -268,7 +268,7 @@ struct LspChannel(Movable):
         # up is in its first lines.
         self.stderr_log = CappedText(_STDERR_CAP, keep_tail=False)
         self.dead = False
-        self._last_active = 0
+        self._last_active_session = 0
 
     # --- sessions ----------------------------------------------------------
 
@@ -362,7 +362,7 @@ struct LspChannel(Movable):
         mut self, sid: Int, method: String, params: JsonValue,
     ) raises -> String:
         var id = self.client.send_request(method, params)
-        self._last_active = sid
+        self._last_active_session = sid
         if method == String("initialize"):
             self._init_id = id
         self._requests.append(_Outstanding(id, sid))
@@ -371,7 +371,7 @@ struct LspChannel(Movable):
     def send_notification(
         mut self, sid: Int, method: String, params: JsonValue,
     ) raises:
-        self._last_active = sid
+        self._last_active_session = sid
         if method == String("initialized"):
             # Once per process: a joiner replays the cached initialize
             # result through the same code path, which sends this again.
@@ -544,8 +544,8 @@ struct LspChannel(Movable):
 
     def _active_session(self) -> Int:
         """The last session to talk to the server, if it's still here."""
-        if self._index_of(self._last_active) >= 0:
-            return self._last_active
+        if self._index_of(self._last_active_session) >= 0:
+            return self._last_active_session
         return self._sessions[0].id
 
     def _session_named_in(self, text: String) -> Int:

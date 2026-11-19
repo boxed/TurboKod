@@ -1974,22 +1974,22 @@ def _highlight_generic_line(
     # Pre-extract needle byte strings as ``List[UInt8]``. We can't pass
     # ``Span`` around the helpers without drowning in origin parameters,
     # so we copy once up front (these are 0-3 bytes each) and check
-    # prefix equality via ``_starts_with``.
-    var bo = _to_bytes_list(spec.block_open)
-    var bc = _to_bytes_list(spec.block_close)
-    var lc = _to_bytes_list(spec.line_comment)
-    var qb = _to_bytes_list(spec.quotes)
+    # prefix equality via ``_bytes_match_at``.
+    var block_open = _to_bytes_list(spec.block_open)
+    var block_close = _to_bytes_list(spec.block_close)
+    var line_comment = _to_bytes_list(spec.line_comment)
+    var quote_bytes = _to_bytes_list(spec.quotes)
 
     # Continuation of a block comment from a prior line.
     if state == _HL_IN_BLOCK_COMMENT:
         var attr = highlight_comment_attr()
-        if len(bc) == 0:
+        if len(block_close) == 0:
             # Spec changed under us? Bail out conservatively.
             return _HL_NORMAL
         var j = 0
         var found = -1
-        while j + len(bc) <= n:
-            if _starts_with(line, j, bc):
+        while j + len(block_close) <= n:
+            if _bytes_match_at(line, j, block_close):
                 found = j
                 break
             j += 1
@@ -1997,25 +1997,25 @@ def _highlight_generic_line(
             if n > 0:
                 out.append(Highlight(row, 0, n, attr))
             return state
-        out.append(Highlight(row, 0, found + len(bc), attr))
-        i = found + len(bc)
+        out.append(Highlight(row, 0, found + len(block_close), attr))
+        i = found + len(block_close)
         state = _HL_NORMAL
 
     while i < n:
         var c = b[i]
 
         # Line comment: rest of line.
-        if len(lc) > 0 and _starts_with(line, i, lc):
+        if len(line_comment) > 0 and _bytes_match_at(line, i, line_comment):
             out.append(Highlight(row, i, n, highlight_comment_attr()))
             return state
 
         # Block comment open (may span lines).
-        if len(bo) > 0 and _starts_with(line, i, bo):
+        if len(block_open) > 0 and _bytes_match_at(line, i, block_open):
             var start = i
-            var j = i + len(bo)
+            var j = i + len(block_open)
             var found = -1
-            while j + len(bc) <= n:
-                if _starts_with(line, j, bc):
+            while j + len(block_close) <= n:
+                if _bytes_match_at(line, j, block_close):
                     found = j
                     break
                 j += 1
@@ -2023,17 +2023,17 @@ def _highlight_generic_line(
                 out.append(Highlight(row, start, n, highlight_comment_attr()))
                 return _HL_IN_BLOCK_COMMENT
             out.append(Highlight(
-                row, start, found + len(bc), highlight_comment_attr(),
+                row, start, found + len(block_close), highlight_comment_attr(),
             ))
-            i = found + len(bc)
+            i = found + len(block_close)
             continue
 
-        # String literal. ``qb`` lists every byte that opens/closes a
+        # String literal. ``quote_bytes`` lists every byte that opens/closes a
         # string. Backslash escapes consume the next byte. Unterminated
         # strings color to end-of-line — same fallback as Mojo/Python.
         var is_quote = False
-        for q in range(len(qb)):
-            if c == qb[q]:
+        for q in range(len(quote_bytes)):
+            if c == quote_bytes[q]:
                 is_quote = True
                 break
         if is_quote:
@@ -2100,7 +2100,7 @@ def _to_bytes_list(s: String) -> List[UInt8]:
     return out^
 
 
-def _starts_with(line: String, i: Int, needle: List[UInt8]) -> Bool:
+def _bytes_match_at(line: String, i: Int, needle: List[UInt8]) -> Bool:
     """Does ``line[i:]`` begin with ``needle``? Cheap byte-wise prefix
     compare. Returns ``False`` on out-of-bounds rather than raising —
     ``i`` may be at or past the end on the caller's last iteration."""

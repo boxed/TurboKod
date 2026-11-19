@@ -7,7 +7,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from turbokod.canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from turbokod.canvas import Canvas, utf8_byte_cell_map
 from turbokod.colors import Attr, BLACK, WHITE, default_attr
 from turbokod.editor import Editor, TextBuffer
 from turbokod.session_store import Session, SessionWindow, save_session
@@ -29,7 +29,7 @@ from turbokod.project_targets import resolve_python_interpreter
 from turbokod.string_utils import (
     char_width, display_columns, escape_drop_paths, prev_codepoint_start,
     shell_fetch, shell_move_into_place, split_whitespace, string_list,
-    tail_to_columns
+    tail_to_columns, text_cells,
 )
 from turbokod.lsp import capture_command
 from turbokod.posix import debug_log_path, getenv_value
@@ -122,7 +122,7 @@ def test_prev_codepoint_start_tolerates_past_eol_columns() raises:
 
 def test_emoji_double_width() raises:
     """Wide glyphs (emoji, CJK) occupy two cells end-to-end: ``char_width`` reports 2,
-    ``display_columns`` / ``utf8_byte_to_cell`` / ``utf8_codepoint_count``
+    ``display_columns`` / ``utf8_byte_cell_map`` / ``text_cells``
     all count two, and ``put_text`` paints the glyph plus an empty
     width-0 continuation cell so following text stays aligned."""
     assert_equal(char_width(0x1F680), 2)  # 🚀
@@ -153,12 +153,12 @@ def test_emoji_double_width() raises:
     # The byte→cell map and cell count agree with put_text: bytes are
     # a(1) + emoji(4) + b(1); 'b' lands at cell 3.
     var s = String("a🚀b")
-    var cm = utf8_byte_to_cell(s)
+    var cm = utf8_byte_cell_map(s)
     assert_equal(len(cm), 6)
     assert_equal(cm[0], 0)
     assert_equal(cm[1], 1)
     assert_equal(cm[5], 3)
-    assert_equal(utf8_codepoint_count(s), 4)
+    assert_equal(text_cells(s), 4)
 
     # A wide glyph that can't fit before ``max_x`` is dropped rather than
     # painting a half glyph past the limit.

@@ -1907,8 +1907,8 @@ struct WindowManager(Movable):
     var windows: List[Window]
     var focused: Int
     var z_order: List[Int]
-    var _dragging: Int
-    var _resizing: Int
+    var _dragging_idx: Int
+    var _resizing_idx: Int
     var _editor_dragging: Int   # window index for in-body editor select-drag
     var _v_scrolling: Int       # window idx, or -1: dragging the v-thumb
     var _h_scrolling: Int       # window idx, or -1: dragging the h-thumb
@@ -1936,7 +1936,7 @@ struct WindowManager(Movable):
     var _has_last_workspace: Bool
     # A click on the close button of a window holding unsaved edits: the
     # window's index, left for the host to save or ask about (``-1``: none).
-    var close_requested: Int
+    var close_requested_idx: Int
     var tabbed: Bool
     """Tabbed layout (macOS-style UI, Mac OS 9 look): every window is
     frameless and fills the workspace; only the focused one paints.
@@ -1955,8 +1955,8 @@ struct WindowManager(Movable):
         self.windows = List[Window]()
         self.focused = -1
         self.z_order = List[Int]()
-        self._dragging = -1
-        self._resizing = -1
+        self._dragging_idx = -1
+        self._resizing_idx = -1
         self._editor_dragging = -1
         self._v_scrolling = -1
         self._h_scrolling = -1
@@ -1970,7 +1970,7 @@ struct WindowManager(Movable):
         self._title_hover_idx = -1
         self._last_workspace = Rect.empty()
         self._has_last_workspace = False
-        self.close_requested = -1
+        self.close_requested_idx = -1
         self.tabbed = False
         self.gutter = 0
         self.grid_bar = False
@@ -2422,8 +2422,8 @@ struct WindowManager(Movable):
         elif event.pressed and event.motion:
             return self._handle_motion(event, workspace)
         else:
-            self._dragging = -1
-            self._resizing = -1
+            self._dragging_idx = -1
+            self._resizing_idx = -1
             self._editor_dragging = -1
             self._v_scrolling = -1
             self._h_scrolling = -1
@@ -2449,7 +2449,7 @@ struct WindowManager(Movable):
         if self.windows[self.focused].close_button_hit(event.pos):
             if self.windows[self.focused].is_editor \
                     and self.windows[self.focused].editor.dirty:
-                self.close_requested = self.focused
+                self.close_requested_idx = self.focused
             else:
                 _ = self.close_focused()
             return True
@@ -2485,13 +2485,13 @@ struct WindowManager(Movable):
                 return True
         var edges = self.windows[self.focused].resize_edges_hit(event.pos)
         if edges[0] or edges[1] or edges[2]:
-            self._resizing = self.focused
+            self._resizing_idx = self.focused
             self._resize_left = edges[0]
             self._resize_right = edges[1]
             self._resize_bottom = edges[2]
             return True
         if self.windows[self.focused].title_bar_hit(event.pos):
-            self._dragging = self.focused
+            self._dragging_idx = self.focused
             self._drag_dx = event.pos.x - self.windows[self.focused].rect.a.x
             self._drag_dy = event.pos.y - self.windows[self.focused].rect.a.y
             return True
@@ -2503,20 +2503,20 @@ struct WindowManager(Movable):
         return True
 
     def _handle_motion(mut self, event: Event, workspace: Rect) -> Bool:
-        if self._dragging >= 0:
-            var width = self.windows[self._dragging].rect.width()
-            var height = self.windows[self._dragging].rect.height()
+        if self._dragging_idx >= 0:
+            var width = self.windows[self._dragging_idx].rect.width()
+            var height = self.windows[self._dragging_idx].rect.height()
             var nx = event.pos.x - self._drag_dx
             var ny = event.pos.y - self._drag_dy
             if nx < workspace.a.x: nx = workspace.a.x
             if ny < workspace.a.y: ny = workspace.a.y
             if nx + width > workspace.b.x: nx = workspace.b.x - width
             if ny + height > workspace.b.y: ny = workspace.b.y - height
-            self.windows[self._dragging].rect = Rect(nx, ny, nx + width, ny + height)
-            self.windows[self._dragging].is_maximized = False
+            self.windows[self._dragging_idx].rect = Rect(nx, ny, nx + width, ny + height)
+            self.windows[self._dragging_idx].is_maximized = False
             return True
-        if self._resizing >= 0:
-            var rect = self.windows[self._resizing].rect
+        if self._resizing_idx >= 0:
+            var rect = self.windows[self._resizing_idx].rect
             var ax = rect.a.x
             var ay = rect.a.y
             var bx = rect.b.x
@@ -2533,8 +2533,8 @@ struct WindowManager(Movable):
                 by = event.pos.y + 1
                 if by > workspace.b.y: by = workspace.b.y
                 if by - ay < MIN_WIN_H: by = ay + MIN_WIN_H
-            self.windows[self._resizing].rect = Rect(ax, ay, bx, by)
-            self.windows[self._resizing].is_maximized = False
+            self.windows[self._resizing_idx].rect = Rect(ax, ay, bx, by)
+            self.windows[self._resizing_idx].is_maximized = False
             return True
         if self._v_scrolling >= 0:
             self.windows[self._v_scrolling].v_drag_thumb_to(

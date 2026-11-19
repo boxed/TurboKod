@@ -19,7 +19,7 @@ from .file_io import (
 from .lsp import LspProcess, capture_command
 from .onig import OnigRegex
 from .posix import (
-    DRAIN_MORE, SIGTERM, close_fd, drain_fd, kill_pid,
+    DRAIN_OPEN, SIGTERM, close_fd, drain_fd, kill_pid,
     reap_child, untrack_child, waitpid_nohang,
 )
 from .search_options import (
@@ -259,7 +259,7 @@ def _git_ls_files_argv(root: String, ignored_only: Bool) -> List[String]:
     """
     var argv = List[String]()
     argv.append(String("git"))
-    # Read-only query: never take ``.git/index.lock`` (see ``_git_argv`` in
+    # Read-only query: never take ``.git/index.lock`` (see ``git_argv`` in
     # ``git_changes.mojo``).
     argv.append(String("--no-optional-locks"))
     argv.append(String("-C"))
@@ -421,7 +421,7 @@ struct FileIndexer(Movable):
         # An unrecoverable read error is treated as end-of-stream too.
         var saw_eof = drain_fd(
             self.proc.stdout_fd, self.buf, 1024 * 1024, 65536,
-        )[1] != DRAIN_MORE
+        )[1] != DRAIN_OPEN
         var start = 0
         for i in range(len(self.buf)):
             if self.buf[i] == 0:

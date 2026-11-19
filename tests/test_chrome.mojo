@@ -7,7 +7,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from turbokod.canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from turbokod.canvas import Canvas, utf8_byte_cell_map
 from turbokod.painter import Painter
 from turbokod.cell import Cell
 from turbokod.colors import (
@@ -31,7 +31,9 @@ from turbokod.buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit
 )
 from turbokod.status import StatusBar, StatusTab
-from turbokod.string_utils import utf8_cell_of_byte, utf8_byte_of_cell
+from turbokod.string_utils import (
+    text_cells, utf8_cell_of_byte, utf8_byte_of_cell,
+)
 from turbokod.posix import monotonic_ms, which
 from turbokod.settings import Settings
 from turbokod.canvas import paint_drop_shadow
@@ -146,7 +148,7 @@ def test_hotkey_gate_registers_editor_chords() raises:
 def test_tab_cell_byte_converters_match_put_text() raises:
     """Tabs expand to the next TAB_WIDTH (4) boundary, and the scalar
     byte↔cell converters used for cursor positioning agree with what
-    ``put_text`` / ``utf8_byte_to_cell`` actually paint. Regression for
+    ``put_text`` / ``utf8_byte_cell_map`` actually paint. Regression for
     the makefile case where the caret drifted off the glyph because the
     cursor's column was computed treating ``\\t`` as one cell."""
     # Leading tab (makefile recipe line): '\t' then "gcc".
@@ -163,10 +165,10 @@ def test_tab_cell_byte_converters_match_put_text() raises:
     assert_equal(utf8_byte_of_cell(line, 4), 1)
 
     # Agreement with the painter's own byte→cell map and with put_text.
-    var cm = utf8_byte_to_cell(line)
+    var cm = utf8_byte_cell_map(line)
     assert_equal(cm[0], 0)
     assert_equal(cm[1], 4)
-    assert_equal(utf8_codepoint_count(line), 7)  # 4-cell tab + "gcc"
+    assert_equal(text_cells(line), 7)  # 4-cell tab + "gcc"
     var c = Canvas(20, 1)
     _ = c.put_text(Point(0, 0), line, default_attr())
     assert_equal(c.get(0, 0).glyph, String(" "))  # tab → spaces

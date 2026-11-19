@@ -26,10 +26,10 @@ from .json import (
 from .case_fold import fold_byte
 from .string_utils import hex_digit_value, utf8_prefix
 from .posix import (
-    DRAIN_MORE, POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
+    DRAIN_OPEN, POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd, drain_fd,
     drain_fd_string, getcwd_path, getenv_value, kill_pid, monotonic_ms,
-    poll_stdin, posix_spawn_file_actions_addclose,
+    poll_readable, posix_spawn_file_actions_addclose,
     posix_spawn_file_actions_adddup2, posix_spawn_file_actions_destroy,
     posix_spawn_file_actions_init, posix_spawnp_call, read_append, reap_child,
     set_nonblocking, stdio_pipes, poll_exit, track_child, untrack_child,
@@ -108,10 +108,10 @@ def _build_envp_from_parent() -> ArgvBuffer:
     # nothing. The handshake then hangs at INITIALIZING with no error.
     # Setting PYTHONUNBUFFERED=1 makes Python flush on every write.
     pairs.append(String("PYTHONUNBUFFERED=1"))
-    return _build_argv_buffer(pairs)
+    return build_argv_buffer(pairs)
 
 
-def _build_argv_buffer(args: List[String]) -> ArgvBuffer:
+def build_argv_buffer(args: List[String]) -> ArgvBuffer:
     var blob = List[UInt8]()
     var offsets = List[Int]()
     for i in range(len(args)):
@@ -190,7 +190,7 @@ def _spawn_piped(
     _ = posix_spawn_file_actions_addclose(fa, stdout_w)
     _ = posix_spawn_file_actions_addclose(fa, stderr_w)
 
-    var argv_buf = _build_argv_buffer(argv)
+    var argv_buf = build_argv_buffer(argv)
     # Forward the parent's environ. Critical for ``mojo-lsp-server``,
     # which uses ``MODULAR_HOME`` (and friends) to locate its own
     # ``std`` package; with an empty env it falls back to ``/opt/modular``,
@@ -305,12 +305,12 @@ def _drain_both_to_eof(out_fd: Int32, err_fd: Int32) -> Tuple[String, String]:
             if not open[i]:
                 continue
             var r = drain_fd(fds[i], bufs[i], 1 << 20)
-            if r[1] != DRAIN_MORE:
+            if r[1] != DRAIN_OPEN:
                 open[i] = False
             progressed = progressed or r[0] > 0 or not open[i]
         if not progressed:
             # Nothing ready: block briefly on whichever is still open.
-            _ = poll_stdin(fds[0] if open[0] else fds[1], Int32(20))
+            _ = poll_readable(fds[0] if open[0] else fds[1], Int32(20))
     return (
         String(StringSpan(unsafe_from_utf8=Span(bufs[0]))),
         String(StringSpan(unsafe_from_utf8=Span(bufs[1]))),
@@ -603,7 +603,7 @@ struct LspProcess(Copyable, Movable):
                 first = False
             else:
                 poll_budget = Int32(0)
-            if not poll_stdin(self.stdout_fd, poll_budget):
+            if not poll_readable(self.stdout_fd, poll_budget):
                 return Optional[String]()
             # Straight into the buffer's spare capacity: no scratch to
             # zero and copy out of.
@@ -634,7 +634,7 @@ struct LspProcess(Copyable, Movable):
                     )
                 return extracted
             # No complete message yet — keep draining while bytes are
-            # available. ``poll_stdin(0)`` on the next iteration exits
+            # available. ``poll_readable(0)`` on the next iteration exits
             # the loop when the pipe is empty.
 
     def _extract_one_message(mut self) -> Optional[String]:

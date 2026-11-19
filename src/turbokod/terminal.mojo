@@ -32,7 +32,7 @@ from .geometry import Point
 from .posix import (
     STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE, alloc_zero_buffer,
     append_string_bytes, cfmakeraw, get_window_size, getenv_value,
-    monotonic_ms, poll_stdin, query_size_via_cursor, read_into, tcflush,
+    monotonic_ms, poll_readable, query_size_via_cursor, read_into, tcflush,
     tcgetattr, tciflush_value, tcsetattr, write_buffer, write_string,
 )
 
@@ -357,7 +357,7 @@ struct Terminal:
         # Cap iterations so a user holding the mouse wheel can't stall exit.
         var scratch = alloc_zero_buffer(256)
         var iterations = 0
-        while iterations < 50 and poll_stdin(STDIN_FD, Int32(10)):
+        while iterations < 50 and poll_readable(STDIN_FD, Int32(10)):
             var n = read_into(STDIN_FD, scratch, 256)
             if n <= 0:
                 break
@@ -389,7 +389,7 @@ struct Terminal:
         """
         if self._queue_head < len(self._queue):
             return False
-        if poll_stdin(STDIN_FD, Int32(0)):
+        if poll_readable(STDIN_FD, Int32(0)):
             return False
         var size = query_size_via_cursor(STDIN_FD, STDOUT_FD)
         if size[0] <= 0 or size[1] <= 0:
@@ -482,11 +482,11 @@ struct Terminal:
         if self._queue_head < len(self._queue):
             self._trace(String("    poll_event:queue-hit\n"))
             return self._pop_queue()
-        self._trace(String("    poll_event:before-poll_stdin\n"))
-        var has_input = poll_stdin(STDIN_FD, Int32(timeout_ms))
+        self._trace(String("    poll_event:before-poll_readable\n"))
+        var has_input = poll_readable(STDIN_FD, Int32(timeout_ms))
         if tracing:
             self._trace(
-                String("    poll_event:after-poll_stdin has=")
+                String("    poll_event:after-poll_readable has=")
                 + (String("True") if has_input else String("False"))
                 + String("\n"),
             )

@@ -210,7 +210,7 @@ def main() raises:
                     # ``EVENT_RESIZE`` with ``terminal.width/height``
                     # already updated. We have to mirror that into the
                     # back canvas here — ``refresh_size`` is short-
-                    # circuited by ``poll_stdin`` whenever the wrapper's
+                    # circuited by ``poll_readable`` whenever the wrapper's
                     # bytes are still pending, so its ``True`` branch
                     # above never gets a chance to do the resize on the
                     # wrapper path.
