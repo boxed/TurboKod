@@ -22,7 +22,9 @@ from turbokod.diff import (
     diff3_regions, diff_lines, diff_row_emphasis, diff_row_line_label,
     diff_row_partner, intraline_ranges, unified_diff
 )
-from turbokod.editor import Editor, TextBuffer
+from turbokod.editor import (
+    Editor, TextBuffer, _split_buffer_lines, _split_lines_sharing,
+)
 from turbokod.view_state_store import StoredViewState
 from turbokod.desktop import Desktop
 from turbokod.file_io import delete_path, join_path, read_file, stat_file, write_file
@@ -1012,6 +1014,56 @@ def test_review_branches_tab_and_review_file_tree() raises:
     d.review.close()
     d._review_teardown()
     _rm_rf(dir)
+
+
+def test_git_head_lines_share_the_buffers_strings() raises:
+    """The HEAD copy splits exactly as ``_split_buffer_lines`` does, and a
+    line the buffer has in the same place — from the top or the bottom —
+    is the buffer's own ``String``, not a second copy of its bytes."""
+    var long_a = String("a line long enough to live on the heap, not inline")
+    var long_b = String("another line that is also too long to be inline..")
+    var long_c = String("a third long line, the last one that is unchanged")
+    var head = long_a + String("\n") + long_b + String("\nshort\n") + long_c
+    var texts = List[String]()
+    texts.append(head)
+    texts.append(head + String("\n"))
+    texts.append(String(""))
+    texts.append(String("\n\n"))
+    texts.append(long_a + String("\r\n") + long_b + String("\r"))
+    texts.append(String("x\ry\n") + long_c)
+    var like = _split_buffer_lines(
+        String("inserted at the top\n") + long_a + String("\nedited\nshort\n") + long_c,
+    )
+    for t in range(len(texts)):
+        var want = _split_buffer_lines(texts[t])
+        var got = _split_lines_sharing(texts[t], like)
+        assert_equal(len(got), len(want))
+        for i in range(len(want)):
+            assert_equal(got[i], want[i])
+    # Unmodified: every line is the buffer's.
+    var ed = Editor(head)
+    ed.set_git_head_text(head, True)
+    for i in range(ed.buffer.line_count()):
+        assert_true(
+            ed._git_head_lines[i].as_bytes().unsafe_ptr()
+            == ed.buffer.lines[i].as_bytes().unsafe_ptr()
+            or ed.buffer.lines[i].byte_length() < 24
+        )
+    assert_true(
+        ed._git_head_lines[0].as_bytes().unsafe_ptr()
+        == ed.buffer.lines[0].as_bytes().unsafe_ptr()
+    )
+    # A line inserted at the top: the rest still line up from the bottom.
+    var ed2 = Editor(String("new first line\n") + head)
+    ed2.set_git_head_text(head, True)
+    assert_true(
+        ed2._git_head_lines[3].as_bytes().unsafe_ptr()
+        == ed2.buffer.lines[4].as_bytes().unsafe_ptr()
+    )
+    # An edit to the buffer leaves the HEAD copy as it was.
+    ed.buffer.lines[1] = String("changed")
+    assert_equal(ed._git_head_lines[1], long_b)
+    assert_equal(ed.git_head_text().value(), head)
 
 
 def test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:

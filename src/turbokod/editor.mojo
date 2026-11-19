@@ -398,6 +398,58 @@ def _split_buffer_lines(text: String) -> List[String]:
     return out^
 
 
+def _span_is(s: String, span: Span[UInt8, _]) -> Bool:
+    var b = s.as_bytes()
+    var n = len(b)
+    if n != len(span):
+        return False
+    for i in range(n):
+        if b[i] != span[i]:
+            return False
+    return True
+
+
+def _split_lines_sharing(text: String, like: List[String]) -> List[String]:
+    """``_split_buffer_lines(text)``, except that a line ``like`` has in
+    the same place — counted from the top, or from the bottom — is
+    ``like``'s ``String`` rather than a new one, so the two lists share
+    its bytes (a ``String`` copy does).
+
+    For the copy of a file at ``HEAD`` next to its buffer: an unmodified
+    file's every line is the buffer's, and a modified one's are on both
+    sides of the edit, so the copy costs its list of 24-byte headers
+    instead of the file's text a second time (1.9 MB to 0.5 on a 19k-line
+    file)."""
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    var count = 1
+    for i in range(n):
+        if bytes[i] == 0x0A:
+            count += 1
+    # Where a line counted from the bottom sits in ``like``.
+    var shift = len(like) - count
+    var out = List[String](capacity=count)
+    var start = 0
+    var k = 0
+    for i in range(n + 1):
+        if i < n and bytes[i] != 0x0A:
+            continue
+        var end = i
+        if end > start and bytes[end - 1] == 0x0D:
+            end -= 1
+        var span = bytes[start:end]
+        if k < len(like) and _span_is(like[k], span):
+            out.append(like[k])
+        elif shift != 0 and k + shift >= 0 and k + shift < len(like) \
+                and _span_is(like[k + shift], span):
+            out.append(like[k + shift])
+        else:
+            out.append(String(StringSpan(unsafe_from_utf8=span)))
+        start = i + 1
+        k += 1
+    return out^
+
+
 def _mapped_row(row_map: List[Int], row: Int) -> Int:
     """Where ``row`` went, per ``row_map`` (new row of each old one, -1
     for a line that went): a gone line's row is as far below the last
@@ -5093,7 +5145,7 @@ struct Editor(Copyable, Movable):
         ``apply_revert_block`` would splice ``\\r``-laden lines back
         into the buffer.
         """
-        self._git_head_lines = _split_buffer_lines(text)
+        self._git_head_lines = _split_lines_sharing(text, self.buffer.lines)
         self._git_head_loaded = True
         self._git_head_present = present
         self._git_changes_dirty = True
