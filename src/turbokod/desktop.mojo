@@ -4977,7 +4977,16 @@ struct Desktop(Movable):
         # a no-op when the dirty flag is clear, so this is cheap on
         # idle frames; on edited frames it does the actual TextMate
         # tokenization against the shared ``grammar_registry``.
-        for i in range(len(self.windows.windows)):
+        # The focused window first: a frame has one slice of time for the
+        # rows beyond what's on screen, and it goes to the file the user
+        # is in. (Restoring a session of big files otherwise spent a
+        # slice on each of them, every frame.)
+        var n_windows = len(self.windows.windows)
+        var slice_spent = False
+        for k in range(n_windows + 1):
+            var i = self.windows.focused if k == 0 else k - 1
+            if i < 0 or i >= n_windows or (k > 0 and i == self.windows.focused):
+                continue
             if self.windows.windows[i].is_editor:
                 # Push the project's pytest file globs so the test gutter
                 # detects this project's test files; cheap + idempotent
@@ -4996,9 +5005,15 @@ struct Desktop(Movable):
                     if w.editor.buffer.line_count() >= _TOKENIZE_SLICE_MIN_LINES:
                         need_row = w.editor.scroll_y \
                             + 2 * max(w.rect.height(), 1) + _TOKENIZE_MARGIN_ROWS
-                    w.editor.flush_highlights(
-                        self.grammar_registry, self.speller, need_row,
-                    )
+                    if slice_spent:
+                        w.editor.flush_highlights(
+                            self.grammar_registry, self.speller, need_row, 0,
+                        )
+                    else:
+                        w.editor.flush_highlights(
+                            self.grammar_registry, self.speller, need_row,
+                        )
+                        slice_spent = w.editor.highlights_pending()
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
