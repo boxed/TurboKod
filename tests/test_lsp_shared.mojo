@@ -502,6 +502,24 @@ def test_capped_text_keeps_the_head_or_the_tail() raises:
     assert_false(tail.full())
 
 
+def test_capped_text_stays_small_while_a_reader_copies_it() raises:
+    """A window mirrors a shared server's stderr by copying the capture
+    whenever it grew. Appending to a string a copy shares doubled its
+    buffer each time: thirty log lines took a 5 KB capture to gigabytes
+    and the app to an ``alloc failed`` abort. Checked every round, so a
+    regression fails at a few kilobytes."""
+    for keep_tail in [False, True]:
+        var log = CappedText(16 * 1024, keep_tail=keep_tail)
+        var mirror = CappedText(16 * 1024, keep_tail=keep_tail)
+        for _ in range(200):
+            log.append_line(String("I[09:03:23.155] --> textDocument/definition(41)"))
+            mirror = log.copy()
+            assert_true(log.text.capacity_bytes() <= 4 * 16 * 1024)
+            assert_true(mirror.text.capacity_bytes() <= 4 * 16 * 1024)
+        assert_true(len(log.text.as_bytes()) <= 16 * 1024)
+        assert_true(len(mirror.text.as_bytes()) > 0)
+
+
 def test_a_workspace_folder_is_named_after_its_decoded_root() raises:
     var f = workspace_folder(String("file:///home/me/my%20proj"))
     assert_equal(f.object_get("uri").value().as_str(), "file:///home/me/my%20proj")

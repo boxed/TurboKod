@@ -857,6 +857,26 @@ def test_registries_sharing_a_store_compile_a_grammar_once() raises:
     free_grammar_store(store)
 
 
+def test_highlight_list_stores_a_span_past_64k_as_pieces() raises:
+    """A stored highlight keeps its width in 16 bits. One token wider than
+    that (a string in a minified line) goes in as consecutive pieces that
+    cover the same bytes in the same color; an empty span stays one."""
+    var kw = highlight_keyword_attr()
+    var hls = HighlightList()
+    hls.append(Highlight(2, 1, 70000, kw))
+    hls.append(Highlight(3, 5, 5, kw))
+    assert_equal(len(hls), 3)
+    assert_equal(hls[0].col_start, 1)
+    assert_equal(hls[0].col_end, 65536)
+    assert_equal(hls[1].col_start, 65536)
+    assert_equal(hls[1].col_end, 70000)
+    assert_true(hls[0].row == 2 and hls[1].row == 2)
+    assert_true(hls[0].attr == kw and hls[1].attr == kw)
+    assert_equal(hls[2].col_start, 5)
+    assert_equal(hls[2].col_end, 5)
+    assert_true(hls.copy().same_as(hls))
+
+
 def test_highlight_list_round_trips_and_splices() raises:
     """The compact store gives back exactly the highlights put in, keeps
     each distinct attribute once, and ``extend`` takes a row range from a
@@ -867,13 +887,13 @@ def test_highlight_list_round_trips_and_splices() raises:
     var a = HighlightList()
     a.append(Highlight(0, 0, 3, kw))
     a.append(Highlight(0, 4, 9, st))
-    a.append(Highlight(2, 1, 70000, kw))
+    a.append(Highlight(2, 1, 700, kw))
     a.append(Highlight(5, 0, 2, st))
     assert_equal(len(a), 4)
     assert_equal(len(a.attrs), 2)
     assert_equal(a[2].row, 2)
     assert_equal(a[2].col_start, 1)
-    assert_equal(a[2].col_end, 70000)
+    assert_equal(a[2].col_end, 700)
     assert_true(a[2].attr == kw)
     assert_true(a[1].attr == st)
     assert_equal(a.row(3), 5)

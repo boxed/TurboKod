@@ -58,9 +58,9 @@ Live bytes for one open 913 KB, 19k-line source file (`desktop.mojo`):
 | | Before | After |
 |---|---|---|
 | Lines + the on-disk baseline | 2.8 MB | 2.8 MB |
-| Highlights | 9.2 MB | 2.0 MB |
-| Highlight row index | 0.8 MB | 0.2 MB |
-| Spell cache | 1.0 MB | 1.0 MB |
+| Highlights | 9.2 MB | 1.4 MB |
+| Highlight row index | 0.8 MB | 0.1 MB |
+| Spell cache | 1.0 MB | 0.6 MB |
 | HEAD copy for the git gutter | 1.9 MB | 0.4 MB |
 | LSP text snapshot | 0.9 MB | 0.9 MB |
 
@@ -74,8 +74,9 @@ Live bytes for one open 913 KB, 19k-line source file (`desktop.mojo`):
   in 30 ms instead of 146. `load_default` sizes the set from the files'
   sizes and parses words straight from their bytes. An empty set holds
   nothing, so a `Speller` that reads the shared base costs nothing.
-- **Highlights — `HighlightList` (`highlight.mojo`).** 16 bytes each
-  (32-bit positions, the `Attr` as an index into a per-list table) instead
+- **Highlights — `HighlightList` (`highlight.mojo`).** 12 bytes each
+  (a 32-bit row and start, a 16-bit width, the `Attr` as a 16-bit index
+  into a per-list table; a span past 64 KB is stored in pieces) instead
   of a 40-byte `Highlight`. It is what the tokenizers write, the cache
   keeps and an `Editor` holds. `Highlight` is still the value type:
   `hls[i]` gives one, and `to_list()` serves the callers that render a
@@ -102,11 +103,73 @@ Live bytes for one open 913 KB, 19k-line source file (`desktop.mojo`):
   (`trim_undo_history`), taking the excess from the least recently focused
   first.
 
+- **Spell cache.** The misspelled ranges of every row are one flat list
+  with a per-row offset table (`Editor._spell_run_start` /
+  `_spell_run_cols`), not a list per row: those were 24 bytes a line for
+  lists nearly all empty. `_spell_text` stays a `String` per row — it is
+  what makes "this row is unchanged" a pointer compare, and holding the
+  string is what keeps a reused address from reading as unchanged.
+- **The language server's copy of a document** shares the editor's cached
+  snapshot (`Editor.lsp_text()`): opening, saving and the pre-save
+  requests pass that rather than a fresh `text_snapshot()`, and a
+  document found unchanged adopts the caller's string. A request slot
+  drops the text it was asked about when its answer is taken. Before, a
+  file merely opened was held twice until its first edit.
+- **Docsets — `DocStore` (`doc_store.mojo`).** `load` parses the index and
+  scans `db.json` a chunk at a time for where each body is; `html_for`
+  reads and decodes the one asked for. The bodies are 5 to 45 MB a docset
+  (Python 18) and were all kept, per window, from the first Ctrl+K or
+  empty Cmd+click.
+- **Terminal scrollback** is capped in bytes as well as lines
+  (`TK_SCROLLBACK_MAX_BYTES`, 12 MB): 10,000 rows measure 8.5 MB at 80
+  columns but 26 MB at 300, so the line limit alone bounded nothing.
+
+- **Blame — `BlameTable` (`git_blame.mojo`).** One record per distinct
+  commit and a 32-bit index per line. A `BlameLine` per line was 152
+  bytes of string headers each: 2.9 MB for a 19k-line file, kept after
+  the gutter was hidden.
+- **Symbol index.** An entry's name length and owning segment are derived
+  (`_ent_len` from the next entry's offset, `_ent_seg` by binary search
+  over the segments) rather than stored: 13 bytes of bookkeeping an
+  entry instead of 21. The lists are reserved from the file count when a
+  build starts and sized from the live count in `compact`, so they don't
+  double their way up leaving the outgrown blocks behind.
+- **Per-row indexes are 32-bit**: `Editor._hl_row_start` and the
+  tokenizer's `HighlightCache.post_stacks`.
+
+Bounds on input that had none:
+
+- An untracked file over 4 MB isn't diffed in the git view
+  (`_UNTRACKED_DIFF_MAX_BYTES`); the panel gives its size. Its diff is
+  the whole file as additions, read into a string, a diff and per-line
+  lists.
+- A streamed line in a `TextLog` stops at 64 KB and continues on a new
+  row (`_MAX_OPEN_LINE_BYTES`): a `\r` progress bar under Cmd+R is one
+  line that never ends, and `max_lines` counts lines.
+
+Two more allocator lessons, from a crash:
+
+- **`+=` on a `String` that a copy shares doubles its capacity** every
+  time (a stdlib bug in this Mojo version). A capture that a reader
+  copies after each chunk grew exponentially — tens of GB from a 5 KB
+  log. Use `append_in_place` for any long-lived string that is appended
+  to; see CLAUDE.md.
+- **Join buffers are sized up front** (`text_snapshot`, `_disk_text`): a
+  doubling `List[UInt8]` left as much again in outgrown blocks on every
+  snapshot of a large file.
+
 ## Left alone
 
 - `Editor.disk_baseline` and `_lsp_text` are a whole-file `String` each.
   The baseline has to stay byte-exact for the three-way merge; not worth
   the risk for under a megabyte a file.
+- The document text the language-server session keeps (shared with
+  `Editor._lsp_text`, so once per file). A `change_count` stamp could
+  replace it for UTF-8 servers, but UTF-16 servers need the text for
+  column conversion, and it is about thirty call sites.
+- `Editor.git_change_lines` is 8 bytes a row for values 0 to 3. An empty
+  list means "no git data" to the gutter's width, so it can't simply be
+  dropped for unmodified files.
 - `Cell` is 56 bytes, but a window-sized canvas is under 300 KB and the
   frame canvases are reused.
 - The allocator's pool. `TCMALLOC_RELEASE_RATE` / `AGGRESSIVE_DECOMMIT`

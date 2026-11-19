@@ -59,12 +59,17 @@ struct Highlight(ImplicitlyCopyable, Movable):
 
 @fieldwise_init
 struct _PackedHighlight(ImplicitlyCopyable, Movable):
-    """A ``Highlight`` in 16 bytes: 32-bit positions, and the attribute as
-    an index into its ``HighlightList``'s table."""
+    """A ``Highlight`` in 12 bytes: a 32-bit row and start column, the
+    span's width and the attribute — an index into its
+    ``HighlightList``'s table — in 16 bits each. A span wider than
+    ``_MAX_SPAN`` is stored as several (``HighlightList.append``)."""
     var row: Int32
     var col_start: Int32
-    var col_end: Int32
-    var attr: Int32
+    var width: UInt16
+    var attr: UInt16
+
+
+comptime _MAX_SPAN = 65535
 
 
 struct HighlightList(Copyable, Movable, Sized):
@@ -74,7 +79,7 @@ struct HighlightList(Copyable, Movable, Sized):
     A ``Highlight`` is 40 bytes — three 64-bit positions and a 16-byte
     ``Attr`` — and a source file has one for every dozen bytes of text, so
     as a ``List[Highlight]`` an open file's highlights outweighed its text
-    three to one. Here each is 16: a file's highlights use a few dozen
+    three to one. Here each is 12: a file's highlights use a few dozen
     distinct attributes at most, kept once in ``attrs``.
 
     Reads like a list (``len``, ``hls[i]`` gives a ``Highlight``,
@@ -93,7 +98,7 @@ struct HighlightList(Copyable, Movable, Sized):
     def __getitem__(self, i: Int) -> Highlight:
         var p = self.items[i]
         return Highlight(
-            Int(p.row), Int(p.col_start), Int(p.col_end),
+            Int(p.row), Int(p.col_start), Int(p.col_start) + Int(p.width),
             self.attrs[Int(p.attr)],
         )
 
@@ -102,34 +107,48 @@ struct HighlightList(Copyable, Movable, Sized):
         passes over a whole file's."""
         return Int(self.items[i].row)
 
-    def _attr_id(mut self, attr: Attr) -> Int32:
+    def _attr_id(mut self, attr: Attr) -> UInt16:
         # Newest first: a run of tokens tends to repeat the last few.
         var i = len(self.attrs) - 1
         while i >= 0:
             if self.attrs[i] == attr:
-                return Int32(i)
+                return UInt16(i)
             i -= 1
+        if len(self.attrs) >= _MAX_SPAN:
+            # More distinct attributes than an index can name (nothing
+            # produces that many): the last one stands in.
+            return UInt16(len(self.attrs) - 1)
         self.attrs.append(attr)
-        return Int32(len(self.attrs) - 1)
+        return UInt16(len(self.attrs) - 1)
 
     def append(mut self, h: Highlight):
         var id = self._attr_id(h.attr)
-        self.items.append(_PackedHighlight(
-            Int32(h.row), Int32(h.col_start), Int32(h.col_end), id,
-        ))
+        var start = h.col_start
+        var left = max(h.col_end - h.col_start, 0)
+        # A span past 64 KB (one token of a minified line) goes in as
+        # consecutive pieces; an empty one as it is.
+        while True:
+            var w = min(left, _MAX_SPAN)
+            self.items.append(_PackedHighlight(
+                Int32(h.row), Int32(start), UInt16(w), id,
+            ))
+            start += w
+            left -= w
+            if left <= 0:
+                break
 
     def extend(
         mut self, other: Self, lo_row: Int = 0, hi_row: Int = 1 << 62,
     ):
         """Append ``other``'s highlights on rows ``[lo_row, hi_row)``."""
-        var remap = List[Int32](capacity=len(other.attrs))
+        var remap = List[UInt16](capacity=len(other.attrs))
         for i in range(len(other.attrs)):
             remap.append(self._attr_id(other.attrs[i]))
         for i in range(len(other.items)):
             var p = other.items[i]
             if Int(p.row) >= lo_row and Int(p.row) < hi_row:
                 self.items.append(_PackedHighlight(
-                    p.row, p.col_start, p.col_end, remap[Int(p.attr)],
+                    p.row, p.col_start, p.width, remap[Int(p.attr)],
                 ))
 
     def clear(mut self):
@@ -162,7 +181,7 @@ struct HighlightList(Copyable, Movable, Sized):
             var a = self.items[i]
             var b = other.items[i]
             if a.row != b.row or a.col_start != b.col_start \
-                    or a.col_end != b.col_end \
+                    or a.width != b.width \
                     or self.attrs[Int(a.attr)] != other.attrs[Int(b.attr)]:
                 return False
         return True
@@ -565,7 +584,7 @@ struct HighlightCache(Copyable, Movable):
     var lent_len: Int
     """``sync_highlights``: ``>= 0`` while the caller's list *is* the
     cached one (``highlights`` is then empty), holding its length."""
-    var post_stacks: List[Int]
+    var post_stacks: List[Int32]
     """Each line's end-of-line scope stack, as an index into ``stacks``."""
     var stacks: StackTable
 
@@ -573,7 +592,7 @@ struct HighlightCache(Copyable, Movable):
         self.ext = String("")
         self.highlights = HighlightList()
         self.lent_len = -1
-        self.post_stacks = List[Int]()
+        self.post_stacks = List[Int32]()
         self.stacks = StackTable()
 
     def invalidate(mut self):
@@ -582,7 +601,7 @@ struct HighlightCache(Copyable, Movable):
         reconcile."""
         self.highlights = HighlightList()
         self.lent_len = -1
-        self.post_stacks = List[Int]()
+        self.post_stacks = List[Int32]()
         self.stacks = StackTable()
 
 
@@ -842,9 +861,9 @@ def _grammar_pass(
     # rejoins the cached trajectory and reports back via
     # ``stable_row``.
     var start_stack = cache.stacks.stacks[
-        cache.post_stacks[eff_dirty - 1]
+        Int(cache.post_stacks[eff_dirty - 1])
     ].copy()
-    var new_post = List[Int]()
+    var new_post = List[Int32]()
     var stable_row: Int = 0
     # Earliest row the tokenizer may early-exit on: the bottom of the
     # edited range, so every in-place-edited row is re-tokenized before

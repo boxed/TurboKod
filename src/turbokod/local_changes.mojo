@@ -115,7 +115,7 @@ from .highlight import (
 )
 from .output_links import OutputLink, extract_url_links, link_at
 from .painter import Painter
-from .file_io import basename, ci_less, join_path, read_file
+from .file_io import basename, ci_less, join_path, read_file, stat_file
 from .window import DockedPanelStack, paint_window_title, paint_window_title_at
 from .git_changes import (
     apply_patch_to_index, apply_patch_to_worktree, branch_is_merged,
@@ -141,6 +141,7 @@ from .git_output import (
 from .posix import monotonic_ms, wall_clock_ms
 from .install_runner import InstallRunner
 from .string_utils import (
+    append_in_place,
     byte_slice,
     display_columns,
     fnv32,
@@ -309,6 +310,22 @@ comptime _LINE_ADD:       Int = 4
 comptime _LINE_REM:       Int = 5
 comptime _LINE_NONEWLINE: Int = 6
 comptime _LINE_SEPARATOR: Int = 7
+
+
+# An untracked file's diff is the whole file as additions, and nothing in
+# git bounds it: selecting a 200 MB log or database dump read all of it
+# into a string, a diff, split lines and per-line lists — over a gigabyte,
+# on the UI thread. Past this size the panel names the size instead.
+comptime _UNTRACKED_DIFF_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _untracked_size_over_limit(root: String, rel_path: String) -> Int:
+    """The size of ``rel_path`` when it is over
+    ``_UNTRACKED_DIFF_MAX_BYTES``, else 0."""
+    var info = stat_file(join_path(root, rel_path))
+    if info.ok and Int(info.size) > _UNTRACKED_DIFF_MAX_BYTES:
+        return Int(info.size)
+    return 0
 
 
 @fieldwise_init
@@ -2519,6 +2536,11 @@ struct LocalChanges(Movable):
             return
         var fe = self.files[self.sel_file]
         if fe.is_untracked():
+            if _untracked_size_over_limit(self.root, fe.path) > 0:
+                # Not diffed: see ``_UNTRACKED_DIFF_MAX_BYTES``. The panel
+                # says so instead (``_build_files_right_panels``).
+                self.files[self.sel_file].diffs_loaded = True
+                return
             var text = compute_untracked_diff(self.root, fe.path)
             if len(text.as_bytes()) == 0:
                 return
@@ -2570,6 +2592,13 @@ struct LocalChanges(Movable):
                 self.unstaged,
                 String(" (untracked — press Space on the file to stage it)"),
             )
+            var big = _untracked_size_over_limit(self.root, fe.path)
+            if big > 0:
+                _emit_info(
+                    self.unstaged,
+                    String(" (") + String(big // (1024 * 1024))
+                    + String(" MB — too large to show)"),
+                )
         # The index blob is the unstaged side's *before* and the staged
         # side's *after* — the same ``git show :path``. Fetched at most
         # once per build: the spawn is the single most expensive thing
@@ -5489,7 +5518,7 @@ struct LocalChanges(Movable):
         # this step's output, start the next one, and report nothing until
         # the chain either finishes or stops on a failure.
         if self._rebase_step > 0:
-            self._rebase_log += r.output
+            append_in_place(self._rebase_log, r.output)
             if not routine:
                 self._rebase_noisy = True
             if self._advance_rebase_chain(ok):

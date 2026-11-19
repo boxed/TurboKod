@@ -15,7 +15,7 @@ Callers check ``full()`` before formatting what they would append, so a
 capped capture costs nothing per message.
 """
 
-from .string_utils import utf8_prefix, utf8_suffix
+from .string_utils import append_in_place, utf8_prefix, utf8_suffix
 
 
 struct CappedText(Copyable, Movable):
@@ -43,8 +43,11 @@ struct CappedText(Copyable, Movable):
         var n = len(s.as_bytes())
         if n == 0:
             return
+        # ``append_in_place``, never a bare ``+=``: a reader that copies the
+        # capture after each chunk (a window mirroring a shared server's
+        # stderr) made every append double the buffer.
         if self.keep_tail:
-            self.text += s
+            append_in_place(self.text, s)
             if len(self.text.as_bytes()) > self.cap:
                 # Built before the assignment: the suffix borrows ``text``.
                 var tail = utf8_suffix(self.text, self.cap)
@@ -54,9 +57,9 @@ struct CappedText(Copyable, Movable):
             return
         var room = self.cap - len(self.text.as_bytes())
         if n <= room:
-            self.text += s
+            append_in_place(self.text, s)
         else:
-            self.text += utf8_prefix(s, room)
+            append_in_place(self.text, utf8_prefix(s, room))
             self._cut = True
 
     def append_line(mut self, s: String):

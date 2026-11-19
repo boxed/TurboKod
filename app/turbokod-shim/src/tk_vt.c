@@ -31,6 +31,13 @@
 #define TK_CELL_W 8
 #define TK_CELL_H 16
 
+// Cap on one terminal's scrollback, alongside the line limit the caller
+// passes. A row measures about 9 bytes a cell plus 140 (10,000 rows: 8.5 MB
+// at 80 columns, 11 at 120, 18 at 200, 26 at 300), so this keeps the whole
+// 10,000-line history up to about 130 columns and proportionally fewer
+// lines in a wider pane.
+#define TK_SCROLLBACK_MAX_BYTES ((size_t)12 << 20)
+
 // Words per cell in a snapshot (see ``tk_vt_cells``).
 #define TK_CELL_WORDS 6
 
@@ -253,6 +260,17 @@ void *tk_vt_new(int64_t cols, int64_t rows, int64_t scrollback_lines) {
   size_t lines = scrollback_lines < 0 ? 0 : (size_t)scrollback_lines;
   ghostty_terminal_set(v->term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
                        &lines);
+  // A line limit alone bounds nothing: a line's cost is its width, so the
+  // same history is three times the memory in a 300-column pane as in an
+  // 80-column one. Whichever
+  // limit is reached first applies. Not set for a terminal with no
+  // scrollback at all — a zero byte limit means the same, a nonzero one
+  // would not.
+  if (lines > 0) {
+    size_t bytes = TK_SCROLLBACK_MAX_BYTES;
+    ghostty_terminal_set(v->term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                         &bytes);
+  }
   // Alt sends an ESC prefix — what the hand-rolled encoder did, and what
   // readline / zsh word motions expect from the macOS Option key. It is a
   // terminal mode (1036) the key encoder copies from the terminal, so it is

@@ -38,6 +38,27 @@ def byte_slice(s: String, start: Int, end: Int) -> String:
     return String(StringSpan(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
+def append_in_place(mut s: String, t: String):
+    """``s += t`` for a string that lives on and is appended to again and
+    again (a log, a streamed line), safe when something holds a copy of it.
+
+    A ``String`` copy shares its bytes, and in this Mojo version ``+=`` on
+    a string that shares them reallocates to *twice the capacity* every
+    time, whether or not the text needed the room. Append, copy, append,
+    copy — a capture some reader snapshots after each chunk — doubled a
+    5 KB log's buffer per chunk: gigabytes after thirty lines, and an
+    ``alloc failed`` abort soon after. An unshared string never has more
+    than twice its length in capacity, so more than that means the append
+    went through the shared path, and the bytes are copied out at their
+    own size."""
+    s += t
+    var n = s.byte_length()
+    if s.capacity_bytes() > 2 * n + 64:
+        # Built before the assignment: the span borrows ``s``.
+        var exact = byte_slice(s, 0, n)
+        s = exact^
+
+
 def utf8_prefix(s: String, max_bytes: Int) -> String:
     """The longest prefix of ``s`` of at most ``max_bytes`` bytes that ends
     on a codepoint boundary — a byte cap that can't split a character."""

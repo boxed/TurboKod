@@ -39,7 +39,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import (
-    byte_of_cell_in, byte_slice, cells_between, char_width, codepoint_at,
+    append_in_place, byte_of_cell_in, byte_slice, cells_between, char_width, codepoint_at,
     is_word_codepoint, leading_indent_bytes, seg_cell_offset, word_range_at,
     TAB_WIDTH,
 )
@@ -954,6 +954,11 @@ def _drop_front[T: Copyable & Deinitable](mut items: List[T], k: Int):
         _ = items.pop()
 
 
+# A streamed line stops growing here and continues on a new row (see
+# ``TextLog.append``).
+comptime _MAX_OPEN_LINE_BYTES = 64 * 1024
+
+
 struct TextLog(Copyable, Movable):
     """A read-only text view with soft-wrap, mouse-drag selection,
     scroll, and clipboard copy. Composed by views like the DebugPane
@@ -1099,6 +1104,14 @@ struct TextLog(Copyable, Movable):
         # The first emitted segment continues the previous open line
         # only when both that line and this append are streaming.
         var continue_open = streaming and self._open and len(self.lines) > 0
+        # ...and only while that line is under the cap: output with no
+        # newline in it (a ``\\r`` progress bar redrawing itself for an
+        # hour) would otherwise grow one line without bound — ``max_lines``
+        # counts lines, not bytes. Past the cap it continues on a new row.
+        if continue_open and len(
+            self.lines[len(self.lines) - 1].as_bytes(),
+        ) >= _MAX_OPEN_LINE_BYTES:
+            continue_open = False
         var first = True
         var start = 0
         for i in range(len(b)):
@@ -1137,7 +1150,7 @@ struct TextLog(Copyable, Movable):
             )
         # Appended in place: ``lines[idx] + seg`` copied the whole line
         # per chunk, quadratic in a long streamed line (pytest's dots).
-        self.lines[idx] += seg
+        append_in_place(self.lines[idx], seg)
         if self._layout_w >= 0:
             # Re-wrap from the line's last visual row on: the log wraps
             # hard with no indent, so a row's break depends only on where

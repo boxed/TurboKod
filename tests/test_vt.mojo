@@ -287,6 +287,34 @@ def test_vt_scrollback_captures_rows_off_the_top() raises:
     assert_equal(vt.view_cell_at(0, 0).glyph, String("A"))
 
 
+def test_vt_scrollback_is_capped_in_bytes_as_well_as_lines() raises:
+    """The line limit alone let a wide pane keep several times the memory
+    of a narrow one for the same history. With the byte cap (12 MB) a
+    300-column terminal keeps well under its 10,000 lines, while an
+    80-column one still keeps about all of them."""
+    var row = String("")
+    for _ in range(300):
+        row += String("x")
+    var wide = Vt(300, 4)
+    var narrow = Vt(80, 4)
+    var chunk = String("")
+    for _ in range(100):
+        chunk += row + String("\r\n")
+    for _ in range(120):
+        wide.feed_string(chunk)
+    var short = String("")
+    for _ in range(1000):
+        short += String("line\r\n")
+    for _ in range(12):
+        narrow.feed_string(short)
+    assert_true(wide.scrollback_rows() > 1000)
+    assert_true(wide.scrollback_rows() < 8000)
+    # Pruned a page at a time, so "the line limit" is a little under it.
+    assert_true(narrow.scrollback_rows() > 9000)
+    wide.release()
+    narrow.release()
+
+
 def test_vt_view_offset_shows_scrollback_above_live() raises:
     var vt = Vt(2, 2)
     vt.feed_string(String("A\r\nB\r\nC"))

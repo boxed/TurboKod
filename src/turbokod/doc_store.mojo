@@ -6,13 +6,15 @@ Lifecycle:
 1. ``DocStore.__init__(slug, display)`` — empty, not loaded.
 2. ``store.is_installed(dest_dir)`` — check that ``index.json`` and
    ``db.json`` both exist on disk.
-3. ``store.load(dest_dir)`` — parse both JSON files into the store.
-   Called once per session per language; the parsed structures live
-   for the rest of the session. Raises if either file is missing or
+3. ``store.load(dest_dir)`` — parse the index and find where each body
+   sits in ``db.json``. Called once per session per language; the index
+   lives for the rest of the session. Raises if either file is missing or
    not parseable, so callers can surface a useful error instead of
    silently degrading to an empty picker.
 4. ``store.entries`` — flat ``List[DocEntry]`` for the picker to filter.
-5. ``store.html_for(entry_idx)`` — fetch the raw HTML for one entry.
+5. ``store.html_for(entry_idx)`` — read the raw HTML for one entry from
+   ``db.json``. The bodies are not kept in memory: a docset's are 5 to
+   45 MB (Python 18, C++ 45), and a session reads a handful of pages.
 6. ``html_to_text(html)`` — render HTML to a markdown-flavoured plain
    text body shaped for an editor pane: ``<h1>``..``<h6>`` become
    ``#``..``######``, paragraphs and other block elements are
@@ -41,8 +43,11 @@ DevDocs JSON shape (as shipped by https://documents.devdocs.io/):
 from std.collections.list import List
 
 from .case_fold import fold_ascii, fold_byte
-from .file_io import join_path, read_file, stat_file
+from std.ffi import external_call
+
+from .file_io import FileInfo, join_path, read_file, read_file_range, stat_file
 from .json import parse_json
+from .posix import close_fd, read_into
 from .string_utils import display_columns, hex_digit_value
 
 
@@ -63,24 +68,24 @@ struct DocStore(Copyable, Movable):
     ``entries`` empty but skips the re-load attempt.
 
     Marked ``Copyable`` so ``Desktop`` can stash these in
-    ``List[DocStore]`` (Mojo lists require ``Copyable``). Copies aren't
-    cheap on a populated store — they duplicate the entries list and
-    every body string — but the list is grown via ``^`` transfer and
-    indexed through references everywhere it matters, so the slow
-    branch never fires in practice. We pay a copy on the rare host that
-    runs ``stores[i] = ...`` without an explicit transfer."""
+    ``List[DocStore]`` (Mojo lists require ``Copyable``). The list is
+    grown via ``^`` transfer and indexed through references everywhere
+    it matters, so a populated store is never actually copied."""
 
     var slug: String
     var display: String
     var loaded: Bool
     var entries: List[DocEntry]
-    # Flat body store: parallel ``_body_paths`` / ``_body_html``. We
-    # don't use a dict because Mojo's stdlib doesn't ship one with the
-    # right ergonomics for ``String`` keys yet, and a linear scan over a
-    # few thousand entries is fine for the lookup-on-pick path
-    # (the picker scan is over ``entries``, not bodies).
+    # Where each body is in ``db.json``: parallel ``_body_paths`` (the
+    # db's keys) / ``_body_off`` / ``_body_len``, the last two the byte
+    # span of the value's JSON string literal, quotes included.
+    # ``html_for`` reads and decodes that one span. ``_db_stamp`` is the
+    # file the spans were found in; a reinstalled docset is scanned again.
     var _body_paths: List[String]
-    var _body_html: List[String]
+    var _body_off: List[Int]
+    var _body_len: List[Int]
+    var _db_path: String
+    var _db_stamp: FileInfo
 
     def __init__(out self, var slug: String, var display: String):
         self.slug = slug^
@@ -88,7 +93,10 @@ struct DocStore(Copyable, Movable):
         self.loaded = False
         self.entries = List[DocEntry]()
         self._body_paths = List[String]()
-        self._body_html = List[String]()
+        self._body_off = List[Int]()
+        self._body_len = List[Int]()
+        self._db_path = String("")
+        self._db_stamp = FileInfo.unknown()
 
     def is_installed(self, dest_dir: String) -> Bool:
         """True iff both DevDocs files exist on disk under ``dest_dir``."""
@@ -97,9 +105,9 @@ struct DocStore(Copyable, Movable):
         return stat_file(idx).ok and stat_file(db).ok
 
     def load(mut self, dest_dir: String) raises:
-        """Parse ``index.json`` + ``db.json`` from ``dest_dir`` into the
-        store. Idempotent: a second call with ``loaded == True`` is a
-        no-op (avoids re-parsing 6+ MB of JSON if the host calls us
+        """Parse ``index.json`` from ``dest_dir`` into the store and find
+        the bodies in its ``db.json`` (``_scan_db``). Idempotent: a second
+        call with ``loaded == True`` is a no-op (the host calls us
         speculatively)."""
         if self.loaded:
             return
@@ -112,8 +120,7 @@ struct DocStore(Copyable, Movable):
         var entries_opt = index_json.object_get(String("entries"))
         if not entries_opt or not entries_opt.value().is_array():
             raise Error(String("docs: malformed index at ") + index_path)
-        # Borrowed: copying the index array, and below each db member
-        # (its whole HTML body), held several docset-sizes during a load.
+        # Borrowed: copying the index array held it twice during a load.
         ref entries_v = entries_opt.value()
         for i in range(entries_v.array_len()):
             ref e = entries_v.arr_v[i]
@@ -135,35 +142,189 @@ struct DocStore(Copyable, Movable):
             self.entries.append(DocEntry(
                 name, split[0], split[1], type_name,
             ))
-        var db_text = read_file(db_path)
-        if len(db_text.as_bytes()) == 0:
-            raise Error(String("docs: empty db at ") + db_path)
-        var db_json = parse_json(db_text)
-        if not db_json.is_object():
+        if not self._scan_db(db_path):
             raise Error(String("docs: malformed db at ") + db_path)
-        # Walk the obj_v list directly — DevDocs db files have thousands
-        # of entries, so building a parallel two-list view is faster than
-        # iterating ``object_get`` for every body.
-        for i in range(len(db_json.obj_v)):
-            ref member = db_json.obj_v[i]
-            if not member.value.is_string():
-                continue
-            self._body_paths.append(member.key)
-            self._body_html.append(member.value.as_str())
         self.loaded = True
 
-    def html_for(self, entry_idx: Int) -> String:
-        """Raw HTML body of ``entries[entry_idx]``, or empty string when
-        the body file isn't found (orphan index entry — DevDocs ships a
-        few of these). The fragment is *not* applied here; the caller
-        renders the full body and the picker scrolls to the fragment."""
+    def _scan_db(mut self, db_path: String) -> Bool:
+        """Record where each top-level string value of ``db_path`` (one
+        ``{"<file>": "<html>", …}`` object) starts and how long it is,
+        reading the file a chunk at a time: neither it nor a parsed tree
+        of it is ever in memory. False when it isn't such an object."""
+        self._body_paths = List[String]()
+        self._body_off = List[Int]()
+        self._body_len = List[Int]()
+        self._db_path = db_path
+        self._db_stamp = stat_file(db_path)
+        var c_path = db_path + String("\0")
+        var fd = external_call["open", Int32](c_path.unsafe_ptr(), Int32(0))
+        if fd < 0:
+            return False
+        var chunk = List[UInt8](length=_SCAN_CHUNK, fill=0)
+        var state = _DB_START
+        var escaped = False
+        var key = List[UInt8]()
+        var key_escapes = False
+        var value_off = 0
+        var depth = 0
+        var in_str = False
+        var base = 0
+        var ok = False
+        var failed = False
+        var retries = 0
+        while not ok and not failed:
+            var got = read_into(fd, chunk, _SCAN_CHUNK)
+            if got < 0 and retries < 8:
+                # Most likely a signal mid-read.
+                retries += 1
+                continue
+            if got <= 0:
+                break
+            retries = 0
+            for i in range(got):
+                var c = chunk[i]
+                if state == _DB_IN_VALUE:
+                    # The common state by far: an HTML body.
+                    if escaped:
+                        escaped = False
+                    elif c == 0x5C:
+                        escaped = True
+                    elif c == 0x22:
+                        self._body_paths.append(_json_key(key, key_escapes))
+                        self._body_off.append(value_off)
+                        self._body_len.append(base + i + 1 - value_off)
+                        state = _DB_KEY_OR_END
+                elif state == _DB_IN_KEY:
+                    if escaped:
+                        escaped = False
+                        key.append(c)
+                    elif c == 0x5C:
+                        escaped = True
+                        key_escapes = True
+                        key.append(c)
+                    elif c == 0x22:
+                        state = _DB_COLON
+                    else:
+                        key.append(c)
+                elif state == _DB_OTHER:
+                    # A value that isn't a string (DevDocs has none):
+                    # skipped, nesting and all.
+                    if in_str:
+                        if escaped:
+                            escaped = False
+                        elif c == 0x5C:
+                            escaped = True
+                        elif c == 0x22:
+                            in_str = False
+                    elif c == 0x22:
+                        in_str = True
+                    elif c == 0x7B or c == 0x5B:
+                        depth += 1
+                    elif c == 0x7D or c == 0x5D:
+                        if depth == 0:
+                            ok = c == 0x7D
+                            failed = not ok
+                            break
+                        depth -= 1
+                    elif c == 0x2C and depth == 0:
+                        state = _DB_KEY_OR_END
+                elif _is_json_space(c):
+                    pass
+                elif state == _DB_START:
+                    if c != 0x7B:
+                        failed = True
+                        break
+                    state = _DB_KEY_OR_END
+                elif state == _DB_KEY_OR_END:
+                    if c == 0x22:
+                        key.clear()
+                        key_escapes = False
+                        state = _DB_IN_KEY
+                    elif c == 0x7D:
+                        ok = True
+                        break
+                    elif c != 0x2C:
+                        failed = True
+                        break
+                elif state == _DB_COLON:
+                    if c != 0x3A:
+                        failed = True
+                        break
+                    state = _DB_VALUE
+                else:
+                    # ``_DB_VALUE``: the first byte of a value.
+                    if c == 0x22:
+                        value_off = base + i
+                        state = _DB_IN_VALUE
+                    else:
+                        depth = 1 if (c == 0x7B or c == 0x5B) else 0
+                        in_str = False
+                        state = _DB_OTHER
+            base += got
+        _ = close_fd(fd)
+        return ok
+
+    def html_for(mut self, entry_idx: Int) -> String:
+        """Raw HTML body of ``entries[entry_idx]``, read from ``db.json``,
+        or empty string when the body isn't found (orphan index entry —
+        DevDocs ships a few of these) or can't be read. The fragment is
+        *not* applied here; the caller renders the full body and the
+        picker scrolls to the fragment."""
         if entry_idx < 0 or entry_idx >= len(self.entries):
             return String("")
+        if not stat_file(self._db_path).same_content_stamp(self._db_stamp):
+            # Replaced since the scan (the docset was reinstalled): the
+            # spans are for a file that is gone.
+            # Copied: ``_scan_db`` takes ``self`` mutably.
+            var db_path = self._db_path
+            if not self._scan_db(db_path):
+                return String("")
         var path = self.entries[entry_idx].path
         for i in range(len(self._body_paths)):
             if self._body_paths[i] == path:
-                return self._body_html[i]
+                var literal = read_file_range(
+                    self._db_path, self._body_off[i], self._body_len[i],
+                )
+                if len(literal.as_bytes()) == 0:
+                    return String("")
+                try:
+                    var value = parse_json(literal)
+                    if value.is_string():
+                        return value.as_str()
+                except:
+                    pass
+                return String("")
         return String("")
+
+
+comptime _SCAN_CHUNK = 256 * 1024
+
+comptime _DB_START = 0        # before the opening ``{``
+comptime _DB_KEY_OR_END = 1   # before a key, a ``,`` or the closing ``}``
+comptime _DB_IN_KEY = 2
+comptime _DB_COLON = 3
+comptime _DB_VALUE = 4        # before a value
+comptime _DB_IN_VALUE = 5     # inside a string value
+comptime _DB_OTHER = 6        # inside a value of another kind
+
+
+def _is_json_space(c: UInt8) -> Bool:
+    return c == 0x20 or c == 0x0A or c == 0x0D or c == 0x09
+
+
+def _json_key(raw: List[UInt8], escapes: Bool) -> String:
+    """The key whose bytes between the quotes are ``raw``, decoded when
+    it has escapes in it (DevDocs paths rarely do)."""
+    var text = String(StringSpan(unsafe_from_utf8=Span(raw)))
+    if not escapes:
+        return text^
+    try:
+        var value = parse_json(String("\"") + text + String("\""))
+        if value.is_string():
+            return value.as_str()
+    except:
+        pass
+    return text^
 
 
 def _split_at_hash(path: String) -> Tuple[String, String]:

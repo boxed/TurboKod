@@ -5413,7 +5413,10 @@ struct Desktop(Movable):
         if lsp_idx < 0:
             self._maybe_prompt_lsp_install(ext)
             return
-        var text = self.windows.windows[idx].editor.text_snapshot()
+        # ``lsp_text``, the editor's cached snapshot: the server's record of
+        # the document then shares its bytes instead of holding a second
+        # copy of the file until the first edit.
+        var text = self.windows.windows[idx].editor.lsp_text()
         debug_log(String("[_maybe_lsp_open] text snapshot bytes=")
             + String(len(text.as_bytes())))
         self.lsp_managers[lsp_idx].notify_opened(path, text^)
@@ -14991,8 +14994,7 @@ struct Desktop(Movable):
                 if self._willsave_then_save_path != path \
                         and self.lsp_managers[lwi]
                             .server_supports_will_save_wait_until():
-                    var wtext = self.windows.windows[idx] \
-                        .editor.text_snapshot()
+                    var wtext = self.windows.windows[idx].editor.lsp_text()
                     if self.lsp_managers[lwi].request_will_save_wait_until(
                         path, 1, wtext^,
                     ):
@@ -15007,7 +15009,7 @@ struct Desktop(Movable):
                 and not self.windows.windows[idx].editor.read_only:
             var li = self._ready_lsp_for_path(path, String("documentFormattingProvider"))
             if li >= 0:
-                var text = self.windows.windows[idx].editor.text_snapshot()
+                var text = self.windows.windows[idx].editor.lsp_text()
                 if self.lsp_managers[li].request_formatting(path, text^):
                     self._format_then_save_path = path
                     return
@@ -15065,7 +15067,7 @@ struct Desktop(Movable):
             # format-on-save drain, so both paths notify.
             var li = self._lsp_for_path(saved_path)
             if li >= 0:
-                var snap = self.windows.windows[idx].editor.text_snapshot()
+                var snap = self.windows.windows[idx].editor.lsp_text()
                 self.lsp_managers[li].notify_saved(saved_path, snap^)
             # Tell *every* running server that watches files about the
             # on-disk change (type 2 = Changed). This reaches servers other

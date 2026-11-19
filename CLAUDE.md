@@ -457,7 +457,7 @@ Cache layering splits process-wide and per-Editor state:
 * **`GrammarRegistry`** lives on `Desktop` as `grammar_registry`. Multi-grammar (parallel `keys`/`grammars` arrays). Loading a grammar happens *once per language per process*: closing one buffer and opening another in the same language reuses the already-compiled grammar instead of re-parsing the JSON and re-allocating ~125 KB-12 MB of libonig handles. The grammars themselves sit in a `GrammarStore`; in the native app every window's registry shares one (`tk_grammar_store_new` / `GrammarRegistry.share`, like the spelling base), so only `overrides` is per window and `release()` on a sharing registry is a no-op.
 * **`HighlightCache`** still lives on `Editor` as `_hl_cache`, now stripped down to per-buffer incremental state — last `highlights` and `post_stacks` for the splice-and-early-exit logic. No grammar field. The dirty-row marker (`_hl_dirty_row`) sits next to it.
 
-Highlights that live as long as a buffer are a `HighlightList` (16 bytes each, against a 40-byte `Highlight`): it's what the tokenizers write, the cache keeps and `Editor.highlights` is. `Highlight` stays the value type — `hls[i]` gives one, `to_list()` is for rendering a short text once. A grammar's regexes compile on first use (`Grammar.regex(idx)`, never `grammar.regexes[idx]`), a `begin` with its `end`. Sizes, the measuring method and why footprint lies about single structures are in [docs/memory.md](docs/memory.md).
+Highlights that live as long as a buffer are a `HighlightList` (12 bytes each, against a 40-byte `Highlight`): it's what the tokenizers write, the cache keeps and `Editor.highlights` is. `Highlight` stays the value type — `hls[i]` gives one, `to_list()` is for rendering a short text once. A grammar's regexes compile on first use (`Grammar.regex(idx)`, never `grammar.regexes[idx]`), a `begin` with its `end`. Sizes, the measuring method and why footprint lies about single structures are in [docs/memory.md](docs/memory.md).
 
 Edit handlers don't tokenize inline anymore — they only update `_highlights_dirty` / `_hl_dirty_row` via `_mark_hl_dirty`. The actual tokenization happens in `Editor.flush_highlights(mut registry)`, which `Desktop.paint` calls on every editor before drawing. Tests that need synchronous highlights call `flush_highlights(local_registry)` directly. This keeps the registry parameter from invading every public Editor method (handle_key, paste_text, replace_all, …).
 
@@ -686,6 +686,15 @@ What the 1.2 bump changed:
   `b()`, side effects included. A real body in any branch, or an `else`, makes
   it compile correctly. Write `if not a(): _ = b()` instead. This is what
   silently stopped the Find Symbol index from ever becoming ready.
+- **Stdlib bug: `+=` on a `String` a copy shares doubles its capacity.**
+  A `String` copy shares its bytes; appending to one that does reallocates
+  to *twice the capacity* every time, needed or not. Append, copy, append,
+  copy grows the buffer exponentially: a window mirroring a shared language
+  server's stderr took a 5 KB log to tens of GB in thirty lines and aborted
+  the app (`alloc failed`). A string that lives on, is appended to, and may
+  have a copy taken in between — a log, a streamed line — goes through
+  `append_in_place` (`string_utils.mojo`), never a bare `+=`. Local
+  accumulators nobody copies mid-loop are fine.
 
 The context-manager protocol is still deliberately avoided — use explicit
 `start()`/`stop()` instead.

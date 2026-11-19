@@ -134,6 +134,9 @@ binary. Same heuristic ``rg`` uses, and for the same reason: a NUL in
 the first block is a near-perfect binary tell and costs nothing."""
 
 comptime _COMPACT_DEAD_FRACTION: Int = 50
+# The most files the build reserves room for ahead of time (see where
+# ``pending`` is filled); past it the lists grow as they go.
+comptime _RESERVE_MAX_FILES = 50000
 """Percent of ``blob`` that must be dead segments before ``compact``
 bothers rewriting it."""
 
@@ -207,11 +210,13 @@ struct SymbolIndex(Movable):
     # Entry ordinal -> offset of its first byte in ``blob``. Sorted
     # ascending (segments only ever append), which is what lets
     # ``_entry_at`` binary-search a raw hit offset back to an entry.
+    # An entry's length and segment are not stored: names sit back to
+    # back, so the next entry's offset gives the length (``_ent_len``),
+    # and segments own consecutive entries (``_ent_seg``). The two lists
+    # were 8 of an entry's 21 bytes of bookkeeping.
     var ent_off: List[Int32]
-    var ent_len: List[Int32]
     var ent_line: List[Int32]
     var ent_col: List[Int32]
-    var ent_seg: List[Int32]
     # True when ``(ent_line, ent_col)`` is a definition-shaped occurrence
     # (``class Name``, ``def Name``, ``Name = …`` at column 0, …) rather
     # than the first mention. See ``symbol_seed.mojo``.
@@ -248,10 +253,8 @@ struct SymbolIndex(Movable):
         self.blob = List[UInt8]()
         self.blob.append(0)
         self.ent_off = List[Int32]()
-        self.ent_len = List[Int32]()
         self.ent_line = List[Int32]()
         self.ent_col = List[Int32]()
-        self.ent_seg = List[Int32]()
         self.ent_def = List[Bool]()
         self.files = List[String]()
         self.file_size = List[Int64]()
@@ -366,6 +369,18 @@ struct SymbolIndex(Movable):
                 self._retire_segment(i)
                 self.file_mtime_sec[i] = Int64(-1)
                 self.file_mtime_nsec[i] = Int64(-1)
+        # Room for the build up front. A 12k-file project measured about
+        # 100 names and 830 blob bytes a file; lists that double their way
+        # there leave as much again behind in outgrown blocks, and
+        # capacity never written to costs nothing.
+        var expect = min(len(queued), _RESERVE_MAX_FILES)
+        if expect > 0:
+            var ents = len(self.ent_off) + expect * 128
+            self.ent_off.reserve(ents)
+            self.ent_line.reserve(ents)
+            self.ent_col.reserve(ents)
+            self.ent_def.reserve(ents)
+            self.blob.reserve(len(self.blob) + expect * 1024)
         self.pending = queued^
         self.built = len(self.pending) == 0
 
@@ -579,7 +594,7 @@ struct SymbolIndex(Movable):
             var dup = False
             while Int(slots[h]) != 0:
                 var e = Int(slots[h]) - 1
-                if Int(self.ent_len[e]) == len(span) \
+                if self._ent_len(e) == len(span) \
                         and self._entry_equals(e, span):
                     dup = True
                     # The first mention was recorded; a definition
@@ -596,10 +611,8 @@ struct SymbolIndex(Movable):
                 continue
             slots[h] = Int32(len(self.ent_off) + 1)
             self.ent_off.append(Int32(len(self.blob)))
-            self.ent_len.append(Int32(len(span)))
             self.ent_line.append(Int32(line))
             self.ent_col.append(Int32(start - line_start + 1))
-            self.ent_seg.append(Int32(seg_id))
             self.ent_def.append(is_def)
             for k in range(len(span)):
                 self.blob.append(span[k])
@@ -609,6 +622,27 @@ struct SymbolIndex(Movable):
             Int32(ent_start), Int32(len(self.ent_off)), True,
         ))
         self.file_seg[fid] = Int32(seg_id)
+
+    def _ent_len(self, e: Int) -> Int:
+        """Bytes in entry ``e``'s name: up to the NUL before the next
+        entry's (or the end of the blob)."""
+        var end = len(self.blob)
+        if e + 1 < len(self.ent_off):
+            end = Int(self.ent_off[e + 1])
+        return end - Int(self.ent_off[e]) - 1
+
+    def _ent_seg(self, e: Int) -> Int:
+        """The segment owning entry ``e``. Segments are in entry order,
+        each a consecutive run, so this is a binary search."""
+        var lo = 0
+        var hi = len(self.segments) - 1
+        while lo < hi:
+            var mid = (lo + hi + 1) // 2
+            if Int(self.segments[mid].ent_start) <= e:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
 
     def _entry_equals(self, e: Int, name: Span[UInt8, _]) -> Bool:
         """Byte-compare entry ``e``'s name against ``name``. The caller
@@ -633,12 +667,13 @@ struct SymbolIndex(Movable):
             return
         var new_blob = List[UInt8](capacity=len(self.blob) - self.dead_bytes)
         new_blob.append(0)
-        var new_off = List[Int32]()
-        var new_len = List[Int32]()
-        var new_line = List[Int32]()
-        var new_col = List[Int32]()
-        var new_seg = List[Int32]()
-        var new_def = List[Bool]()
+        # Sized to the live entries: grown by doubling while the old lists
+        # are still alive, the rebuild peaked at several times the index.
+        var live = self.entry_count()
+        var new_off = List[Int32](capacity=live)
+        var new_line = List[Int32](capacity=live)
+        var new_col = List[Int32](capacity=live)
+        var new_def = List[Bool](capacity=live)
         var new_segments = List[_Segment]()
         for s in range(len(self.segments)):
             if not self.segments[s].live:
@@ -649,12 +684,10 @@ struct SymbolIndex(Movable):
             var ent_start = len(new_off)
             for e in range(Int(seg.ent_start), Int(seg.ent_end)):
                 var off = Int(self.ent_off[e])
-                var ln = Int(self.ent_len[e])
+                var ln = self._ent_len(e)
                 new_off.append(Int32(len(new_blob)))
-                new_len.append(self.ent_len[e])
                 new_line.append(self.ent_line[e])
                 new_col.append(self.ent_col[e])
-                new_seg.append(Int32(new_sid))
                 new_def.append(self.ent_def[e])
                 for k in range(off, off + ln):
                     new_blob.append(self.blob[k])
@@ -666,10 +699,8 @@ struct SymbolIndex(Movable):
             self.file_seg[Int(seg.file_id)] = Int32(new_sid)
         self.blob = new_blob^
         self.ent_off = new_off^
-        self.ent_len = new_len^
         self.ent_line = new_line^
         self.ent_col = new_col^
-        self.ent_seg = new_seg^
         self.ent_def = new_def^
         self.segments = new_segments^
         self.dead_bytes = 0
@@ -737,7 +768,7 @@ struct SymbolIndex(Movable):
                 break
             var e = self._entry_at(at)
             var off = Int(self.ent_off[e])
-            var ln = Int(self.ent_len[e])
+            var ln = self._ent_len(e)
             # Resume past this entry's terminating NUL whether or not we
             # keep it, so progress is guaranteed.
             pos = off + ln + 1
@@ -747,7 +778,7 @@ struct SymbolIndex(Movable):
             # not results.
             if at < off or at + len(nb) > off + ln:
                 continue
-            var seg = Int(self.ent_seg[e])
+            var seg = self._ent_seg(e)
             if not self.segments[seg].live:
                 continue
             var name_span = Span(self.blob)[off:off + ln]
@@ -758,7 +789,7 @@ struct SymbolIndex(Movable):
             var dup = False
             while Int(slots[h]) != 0:
                 var prev = Int(slots[h]) - 1
-                if Int(self.ent_len[prev]) == ln \
+                if self._ent_len(prev) == ln \
                         and self._entry_equals(prev, name_span):
                     dup = True
                     var k = Int(slot_out[h])
@@ -805,11 +836,11 @@ struct SymbolIndex(Movable):
                 break
             var e = self._entry_at(at)
             var off = Int(self.ent_off[e])
-            var ln = Int(self.ent_len[e])
+            var ln = self._ent_len(e)
             pos = off + ln + 1
             if at != off or ln != len(nb) or not self.ent_def[e]:
                 continue
-            var seg = Int(self.ent_seg[e])
+            var seg = self._ent_seg(e)
             if not self.segments[seg].live:
                 continue
             var fid = Int(self.segments[seg].file_id)

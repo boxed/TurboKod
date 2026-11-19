@@ -189,6 +189,40 @@ def read_existing_file(path: String) raises -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=total)))
 
 
+def read_file_range(path: String, offset: Int, length: Int) -> String:
+    """``length`` bytes of ``path`` from byte ``offset`` — one piece of a
+    large file without reading the rest. Empty on any error or a short
+    read: a piece that isn't all there is not what was asked for."""
+    if offset < 0 or length <= 0:
+        return String("")
+    var c_path = path + String("\0")
+    var fd = external_call["open", Int32](c_path.unsafe_ptr(), O_RDONLY)
+    if fd < 0:
+        return String("")
+    var buf = List[UInt8](capacity=length)
+    buf.resize(unsafe_uninit_length=length)
+    var total = 0
+    var retries = 0
+    while total < length:
+        var got = external_call["pread", Int](
+            fd, buf.unsafe_ptr().unsafe_offset(total), length - total,
+            offset + total,
+        )
+        if got == 0:
+            break
+        if got < 0:
+            retries += 1
+            if retries > 8:
+                break
+            continue
+        retries = 0
+        total += got
+    _ = external_call["close", Int32](fd)
+    if total != length:
+        return String("")
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=length)))
+
+
 def move_aside(path: String) -> Bool:
     """Rename an unreadable file to ``<path>.corrupt[.N]`` so it's
     preserved for recovery and the next save can start clean. Returns True

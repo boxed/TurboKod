@@ -34,9 +34,10 @@ from turbokod.desktop import (
 )
 from turbokod.on_save_location import locate_on_save_error
 from turbokod.lsp_dispatch import Diagnostic
+from turbokod.doc_store import DocStore
 from turbokod.file_io import (
-    delete_path, join_path, list_directory, parent_path, read_file,
-    stat_file, write_file
+    delete_path, join_path, list_directory, make_dir, parent_path, read_file,
+    read_file_range, stat_file, write_file
 )
 from turbokod.git_changes import (
     compute_deletion_revert_block, compute_revert_block, parse_line_history,
@@ -49,7 +50,7 @@ from turbokod.project import FileIndexer
 from turbokod.project_targets import detect_project_language
 from turbokod.host_abi import SHAPE_NS_RESIZE, shape_code, shape_name
 from turbokod.string_utils import (
-    shell_escape_path, shell_single_quote, utf8_prefix,
+    append_in_place, shell_escape_path, shell_single_quote, utf8_prefix,
     utf8_suffix, cells_between, byte_of_cell_in, seg_cell_offset,
     utf8_byte_of_cell,
 )
@@ -359,6 +360,114 @@ def test_shell_single_quote_keeps_utf8_and_escapes_quotes() raises:
                  String("'/Users/Hovmöller'"))
     assert_equal(shell_single_quote(String("it's")), String("'it'\\''s'"))
     assert_equal(shell_single_quote(String("")), String("''"))
+
+
+def test_append_in_place_stays_bounded_while_a_copy_is_alive() raises:
+    """``+=`` on a string whose bytes a copy shares reallocates to twice
+    the capacity each time in this Mojo version, so a log some reader
+    snapshots after every chunk grew its buffer exponentially.
+    ``append_in_place`` keeps it within a small multiple of the text,
+    shared or not, and still appends."""
+    var log = String("")
+    # In a list, so the copy is still alive at the next append.
+    var snapshot = List[String]()
+    snapshot.append(String(""))
+    for i in range(200):
+        append_in_place(log, String("line of output\n"))
+        snapshot[0] = log
+        assert_true(log.capacity_bytes() <= 4 * log.byte_length() + 64)
+        assert_true(
+            snapshot[0].capacity_bytes() <= 4 * snapshot[0].byte_length() + 64
+        )
+        assert_equal(log.byte_length(), 15 * (i + 1))
+    assert_true(log.endswith("line of output\n"))
+    # Unshared, it is a plain amortized append: no copy per call.
+    var alone = String("")
+    for _ in range(200):
+        append_in_place(alone, String("x"))
+    assert_equal(alone.byte_length(), 200)
+    assert_true(alone.capacity_bytes() <= 2 * 200 + 64)
+
+
+def test_read_file_range_reads_one_piece() raises:
+    var path = _temp_path(String("_range.txt"))
+    assert_true(write_file(path, String("0123456789")))
+    assert_equal(read_file_range(path, 3, 4), String("3456"))
+    assert_equal(read_file_range(path, 0, 10), String("0123456789"))
+    # Past the end, or nothing asked for: empty rather than a short piece.
+    assert_equal(read_file_range(path, 8, 4), String(""))
+    assert_equal(read_file_range(path, 2, 0), String(""))
+    assert_equal(read_file_range(path + String(".missing"), 0, 4), String(""))
+
+
+def test_doc_store_reads_bodies_from_disk_on_demand() raises:
+    """A docset's HTML bodies (18 MB for Python) are not kept in memory:
+    ``load`` records where each sits in ``db.json`` and ``html_for`` reads
+    and decodes that one. The bodies here have escapes, non-ASCII text and
+    a quote-heavy one long enough to straddle the scanner's chunks; one
+    key is escaped, one value isn't a string."""
+    var dir = _temp_path(String("_docset"))
+    make_dir(dir)
+    var big = String("")
+    for _ in range(60000):
+        big += String("<p class=\\\"x\\\">é\\\\n</p>")
+    var big_html = String("")
+    for _ in range(60000):
+        big_html += String("<p class=\"x\">é\\n</p>")
+    var index = String(
+        "{\"entries\": ["
+        "{\"name\": \"len\", \"path\": \"library/functions#len\", \"type\": \"Built-in\"},"
+        "{\"name\": \"big\", \"path\": \"big\", \"type\": \"T\"},"
+        "{\"name\": \"slash\", \"path\": \"a/b\", \"type\": \"T\"},"
+        "{\"name\": \"last\", \"path\": \"last\", \"type\": \"T\"},"
+        "{\"name\": \"orphan\", \"path\": \"nowhere\", \"type\": \"T\"}"
+        "]}"
+    )
+    var db = String(
+        "{\"library/functions\": \"<h1>len<\\/h1>\\n<p>\\u00e9 \\\"q\\\" \\\\ end<\\/p>\","
+        " \"meta\": {\"n\": [1, \"}\", {\"k\": \"]\"}]},\n"
+        "\"big\":\""
+    ) + big + String(
+        "\", \"a\\/b\": \"slash key\", \"count\": 3, \"last\": \"the end\"}"
+    )
+    assert_true(write_file(join_path(dir, String("index.json")), index))
+    assert_true(write_file(join_path(dir, String("db.json")), db))
+    var store = DocStore(String("py"), String("Python"))
+    assert_true(store.is_installed(dir))
+    store.load(dir)
+    assert_equal(len(store.entries), 5)
+    assert_equal(
+        store.html_for(0), String("<h1>len</h1>\n<p>é \"q\" \\ end</p>"),
+    )
+    assert_true(store.html_for(1) == big_html)
+    assert_equal(store.html_for(2), String("slash key"))
+    assert_equal(store.html_for(3), String("the end"))
+    assert_equal(store.html_for(4), String(""))
+    assert_equal(store.html_for(99), String(""))
+    # A docset reinstalled under an open store is scanned again.
+    assert_true(write_file(
+        join_path(dir, String("db.json")),
+        String("{\"pad\": \"xxxxxxxxxxxxxxxx\", \"last\": \"moved\"}"),
+    ))
+    assert_equal(store.html_for(3), String("moved"))
+    assert_equal(store.html_for(0), String(""))
+
+
+def test_doc_store_rejects_a_db_that_is_not_an_object() raises:
+    var dir = _temp_path(String("_docset_bad"))
+    make_dir(dir)
+    assert_true(write_file(
+        join_path(dir, String("index.json")), String("{\"entries\": []}"),
+    ))
+    assert_true(write_file(join_path(dir, String("db.json")), String("[1, 2]")))
+    var store = DocStore(String("py"), String("Python"))
+    var raised = False
+    try:
+        store.load(dir)
+    except:
+        raised = True
+    assert_true(raised)
+    assert_false(store.loaded)
 
 
 def test_utf8_prefix_and_suffix_respect_codepoint_boundaries() raises:

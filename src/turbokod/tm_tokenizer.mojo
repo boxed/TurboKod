@@ -167,13 +167,13 @@ def tokenize_with_grammar(
     ``tokenize_with_grammar_full`` for callers that don't need
     the per-line stack snapshots."""
     var table = StackTable()
-    var post_ids = List[Int]()
+    var post_ids = List[Int32]()
     return tokenize_with_grammar_full(grammar, lines, table, post_ids)
 
 
 def tokenize_with_grammar_full(
     grammar: Grammar, lines: List[String],
-    mut table: StackTable, mut post_ids: List[Int],
+    mut table: StackTable, mut post_ids: List[Int32],
     size_hint: Int = 0,
 ) -> HighlightList:
     """As ``tokenize_with_grammar``, but also fills ``post_ids`` with
@@ -185,6 +185,7 @@ def tokenize_with_grammar_full(
 
     ``size_hint`` is how many highlights to make room for up front."""
     post_ids.clear()
+    post_ids.reserve(len(lines))
     table.stacks.clear()
     var out = HighlightList(capacity=size_hint)
     var stack = List[Frame]()
@@ -195,16 +196,16 @@ def tokenize_with_grammar_full(
             next_line = lines[row + 1]
         _tokenize_line(grammar, lines[row], next_line, row, stack, out)
         last = table.intern(stack, last)
-        post_ids.append(last)
+        post_ids.append(Int32(last))
     return out^
 
 
 def tokenize_lines_from(
     grammar: Grammar, lines: List[String],
     start_row: Int, min_row: Int, start_stack: List[Frame],
-    cached_post_ids: List[Int],
+    cached_post_ids: List[Int32],
     mut table: StackTable,
-    mut post_ids: List[Int],
+    mut post_ids: List[Int32],
     mut stable_row: Int,
 ) -> HighlightList:
     """Tokenize ``lines[start_row:]`` starting from ``start_stack``.
@@ -247,10 +248,10 @@ def tokenize_lines_from(
             next_line = lines[row + 1]
         _tokenize_line(grammar, lines[row], next_line, row, stack, out)
         last = table.intern(stack, last)
-        post_ids.append(last)
+        post_ids.append(Int32(last))
         if row >= min_row \
                 and row < len(cached_post_ids) \
-                and last == cached_post_ids[row]:
+                and last == Int(cached_post_ids[row]):
             stable_row = row + 1
             return out^
         row += 1

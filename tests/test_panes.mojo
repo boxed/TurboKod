@@ -349,6 +349,22 @@ def test_text_log_incremental_layout_matches_full_rewrap() raises:
         _assert_visual_eq(log.last_visual[i], fresh[i])
 
 
+def test_text_log_streamed_line_stays_small_while_a_copy_is_alive() raises:
+    """A line streamed chunk by chunk (pytest's dots) is appended to in
+    place. With a copy of it alive between chunks — anything that keeps a
+    row's text — each append doubled the line's buffer."""
+    var log = TextLog(default_attr())
+    # In a list, so the copy is still alive at the next append.
+    var held = List[String]()
+    held.append(String(""))
+    for _ in range(200):
+        log.append(String("."), streaming=True)
+        held[0] = log.lines[len(log.lines) - 1]
+        assert_true(held[0].capacity_bytes() <= 4 * held[0].byte_length() + 64)
+    assert_equal(len(log.lines), 1)
+    assert_equal(log.lines[0].byte_length(), 200)
+
+
 def test_text_log_incremental_layout_handles_trim() raises:
     """When ``_push_line`` trims the front to honor ``max_lines``, the
     cached layout drops the dropped lines' visual rows and renumbers

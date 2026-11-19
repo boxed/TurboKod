@@ -29,7 +29,8 @@ from turbokod.view_state_store import StoredViewState
 from turbokod.desktop import Desktop
 from turbokod.file_io import delete_path, join_path, read_file, stat_file, write_file
 from turbokod.git_blame import (
-    BlameLine, format_commit_time, parse_blame_porcelain, tz_offset_seconds,
+    BlameLine, BlameTable, format_commit_time, parse_blame_porcelain,
+    tz_offset_seconds,
 )
 from turbokod.git_changes import (
     FILE_CHANGE_CHANGED, FILE_CHANGE_CREATED, FILE_CHANGE_DELETED,
@@ -5684,6 +5685,36 @@ def test_commit_info_leaves_out_huge_diffs_until_asked() raises:
     lc._populate_commit_info(show, String(""), registry)
     assert_equal(len(lc._collapsed_rows), 0)
     assert_true(len(lc.info.lines) > 5000)
+
+
+def test_blame_table_keeps_one_record_per_commit() raises:
+    """A file's blame is stored as its distinct commits plus an index per
+    line (a ``BlameLine`` per line was 152 bytes of headers each), and
+    still reads a line at a time."""
+    var a = BlameLine()
+    a.commit = String("aaaaaaaa")
+    a.sha = String("aaaaaaaa00000000000000000000000000000000")
+    a.author = String("Ada")
+    a.summary = String("first")
+    var b = BlameLine()
+    b.commit = String("bbbbbbbb")
+    b.sha = String("bbbbbbbb00000000000000000000000000000000")
+    b.author = String("Bob")
+    var lines = List[BlameLine]()
+    lines.append(a)
+    lines.append(a)
+    lines.append(b)
+    lines.append(BlameLine())
+    lines.append(a)
+    var table = BlameTable.from_lines(lines)
+    assert_equal(len(table), 5)
+    assert_equal(len(table.commits), 3)
+    assert_equal(table[0].author, String("Ada"))
+    assert_equal(table[1].summary, String("first"))
+    assert_equal(table[2].commit, String("bbbbbbbb"))
+    assert_equal(table[3].commit, String(""))
+    assert_equal(table[4].sha, a.sha)
+    assert_equal(len(BlameTable()), 0)
 
 
 def main() raises:

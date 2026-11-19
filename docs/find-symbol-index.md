@@ -320,16 +320,15 @@ the whole query at once, so `FIND_SYMBOL_RESULT_CAP` now truncates a
 
 ## Known costs and follow-ups
 
-- **Memory: ~33 MB per index** on that repo (9.9 MB blob plus 1.17M
-  entries × 20 bytes of parallel arrays). Only paid when Find Symbol is
+- **Memory: ~25 MB per index** on that repo (9.9 MB blob plus 1.17M
+  entries × 13 bytes of parallel arrays — an entry's length and segment
+  are derived, not stored: `_ent_len`, `_ent_seg`). Only paid when Find Symbol is
   actually used — the index is built lazily on first picker open, never
   on project open.
 - **It is per-`Desktop`, so per-window.** Four windows on one project
   build four copies. Sharing would need process-global state, which cuts
   against the one-`Desktop`-per-window architecture and the
   `shutdown`-releases-what-it-owns discipline, so it hasn't been done.
-- `ent_len` is bounded by `SYMBOL_MAX_LEN` (128) and could be a `UInt8`,
-  saving ~3.5 MB. Not done: measured as noise against the blob.
 - `bench_symbol_index.mojo` lives in `tests/`, not `bench/`. As a
   `bench/` entry point it took over ten minutes to compile — the query
   section, written as a loop over a `List[String]` of needles, tripped

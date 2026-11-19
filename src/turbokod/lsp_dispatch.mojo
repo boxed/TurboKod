@@ -786,9 +786,13 @@ struct _Slot[T: Copyable & Defaultable & Deinitable](Copyable, Movable):
             self.finish(Self.T())
 
     def take(mut self) -> Self.T:
+        """Move the parked answer out. Drops ``text`` with it: the host
+        reads that first, and kept, it held a whole-file snapshot until
+        the next request of the kind — past the file being closed."""
         var out = Self.T()
         swap(out, self.value)
         self.ready = False
+        self.text = String("")
         return out^
 
 
@@ -5076,6 +5080,10 @@ struct LspManager(Copyable, Movable):
             # spurious re-analysis (the "analyzing edits…" flicker).
             ref d = self._docs[idx]
             if d.text == text:
+                # Same content: keep the caller's copy, which is the
+                # editor's cached snapshot, so the two share one buffer
+                # rather than each holding the file.
+                d.text = text^
                 return
             d.version += 1
             var version = d.version

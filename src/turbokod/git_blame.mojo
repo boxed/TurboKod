@@ -22,6 +22,7 @@ git exit codes are ignored — a non-zero exit (e.g., ``--`` not in repo)
 yields an empty parse and the caller silently no-ops.
 """
 
+from std.collections.dict import Dict
 from std.collections.list import List
 from std.collections.optional import Optional
 
@@ -73,6 +74,65 @@ struct BlameLine(ImplicitlyCopyable, Movable):
         There is no object to ask git about, so the popup shows the
         placeholder rather than spawning a doomed ``git show``."""
         return self.sha == _ZERO_SHA
+
+
+struct BlameTable(Copyable, Movable, Sized):
+    """A file's blame, a line at a time, stored as one record per distinct
+    commit and an index per line. A ``BlameLine`` is 152 bytes of string
+    headers, and a file has a few hundred commits behind its thousands of
+    lines: a list of them was 2.9 MB for a 19k-line file, kept for as long
+    as the file stayed open.
+
+    Reads like the list it replaces: ``len``, and ``table[row]`` gives the
+    row's ``BlameLine``."""
+    var commits: List[BlameLine]
+    var line_commit: List[Int32]
+
+    def __init__(out self):
+        self.commits = List[BlameLine]()
+        self.line_commit = List[Int32]()
+
+    @staticmethod
+    def from_lines(lines: List[BlameLine]) -> Self:
+        var out = Self()
+        out.line_commit = List[Int32](capacity=len(lines))
+        var seen = Dict[String, Int]()
+        var prev = -1
+        for i in range(len(lines)):
+            if prev >= 0 and _same_blame(lines[i], out.commits[prev]):
+                # Blame comes in runs of lines from one commit.
+                out.line_commit.append(Int32(prev))
+                continue
+            var key = _blame_key(lines[i])
+            var at = seen.get(key, -1)
+            if at < 0:
+                at = len(out.commits)
+                out.commits.append(lines[i])
+                seen[key] = at
+            out.line_commit.append(Int32(at))
+            prev = at
+        return out^
+
+    def __len__(self) -> Int:
+        return len(self.line_commit)
+
+    def __getitem__(self, row: Int) -> BlameLine:
+        return self.commits[Int(self.line_commit[row])]
+
+
+def _same_blame(a: BlameLine, b: BlameLine) -> Bool:
+    return a.sha == b.sha and a.commit == b.commit and a.author == b.author \
+        and a.author_mail == b.author_mail and a.author_time == b.author_time \
+        and a.author_tz == b.author_tz and a.summary == b.summary
+
+
+def _blame_key(bl: BlameLine) -> String:
+    """Every field, NUL-separated: two lines share a record only when all
+    of it is the same."""
+    var sep = String("\0")
+    return bl.sha + sep + bl.commit + sep + bl.author + sep \
+        + bl.author_mail + sep + String(bl.author_time) + sep \
+        + bl.author_tz + sep + bl.summary
 
 
 def _pad2(n: Int) -> String:

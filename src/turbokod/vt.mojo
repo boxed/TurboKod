@@ -47,9 +47,10 @@ from .events import MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT
 
 
 comptime SCROLLBACK_LINES = 10000
-"""Scrollback retained per terminal. Ghostty prunes at page granularity, so
-the real figure is a little higher; its pages are compact enough that this
-costs a few MB for a full history of 80-column output."""
+"""Scrollback retained per terminal, in lines. Ghostty prunes at page
+granularity, so the real figure is a little higher. The shim also caps it
+in bytes (``TK_SCROLLBACK_MAX_BYTES`` in ``tk_vt.c``, 12 MB), which is all
+of these lines up to about 130 columns and fewer in a wider pane."""
 
 # ``tk_vt_get`` keys — keep in step with ``TK_GET_*`` in ``tk_vt.c``.
 comptime _K_COLS = 0

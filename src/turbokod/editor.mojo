@@ -44,7 +44,7 @@ from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import (
     FileInfo, read_existing_file, read_file, stat_file, write_file_stamped,
 )
-from .git_blame import BlameLine
+from .git_blame import BlameLine, BlameTable
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
     GitRevertBlock, GitRevertRequest, compute_deletion_revert_block_lines,
@@ -1492,7 +1492,7 @@ struct Editor(Copyable, Movable):
     ``highlights`` is already in row order, as a tokenizer's output is:
     position ``k`` is then index ``k`` (``_hl_at``), and the file's
     highlights aren't shadowed by 8 bytes apiece."""
-    var _hl_row_start: List[Int]
+    var _hl_row_start: List[Int32]
     var _hl_indexed_n: Int
     """``len(highlights)`` when the index was built, ``-1`` for none. An
     index that doesn't match (highlights set some other way, or an edit
@@ -1511,7 +1511,12 @@ struct Editor(Copyable, Movable):
     # ``_refresh_spell``). ``_spell_version`` is the ``Speller.version``
     # they were computed against; a dictionary change drops them.
     var _spell_text: List[String]
-    var _spell_runs: List[List[Tuple[Int, Int]]]
+    # The misspelled byte ranges of every row in one flat list of
+    # ``start, end`` pairs; row ``r``'s are ``_spell_run_cols`` from index
+    # ``_spell_run_start[r]`` up to ``_spell_run_start[r + 1]``. A list per
+    # row was 24 bytes a line for lists that are nearly all empty.
+    var _spell_run_start: List[Int32]
+    var _spell_run_cols: List[Int32]
     var _spell_directive: List[Bool]
     var _spell_version: Int
     # LSP diagnostics overlay. ``diagnostics`` is the most recent set
@@ -1801,8 +1806,9 @@ struct Editor(Copyable, Movable):
     # populated by the host (Desktop's ``EDITOR_TOGGLE_BLAME`` action
     # runs ``git blame --porcelain`` and feeds the result through
     # ``set_blame``). Off by default — adds a wide left gutter that
-    # would be noise for casual editing.
-    var blame_lines: List[BlameLine]
+    # would be noise for casual editing. One record per commit, not per
+    # line (``BlameTable``).
+    var blame_lines: BlameTable
     var blame_visible: Bool
     # Git-changes gutter. ``git_change_lines[i]`` is one of
     # ``GIT_CHANGE_NONE/ADDED/MODIFIED`` for buffer row ``i``; the host
@@ -2094,12 +2100,13 @@ struct Editor(Copyable, Movable):
         self._hl_dirty_row = 0
         self._hl_dirty_max_row = -1
         self._hl_order = List[Int]()
-        self._hl_row_start = List[Int]()
+        self._hl_row_start = List[Int32]()
         self._hl_indexed_n = -1
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
         self._spell_text = List[String]()
-        self._spell_runs = List[List[Tuple[Int, Int]]]()
+        self._spell_run_start = List[Int32]()
+        self._spell_run_cols = List[Int32]()
         self._spell_directive = List[Bool]()
         self._spell_version = -1
         self.diagnostics = List[Diagnostic]()
@@ -2159,7 +2166,7 @@ struct Editor(Copyable, Movable):
         self.diff_phantom_buckets = List[List[Int]]()
         self.diff_phantom_emph = List[List[Tuple[Int, Int]]]()
         self.diff_emph_by_row = List[List[Tuple[Int, Int]]]()
-        self.blame_lines = List[BlameLine]()
+        self.blame_lines = BlameTable()
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
@@ -2355,7 +2362,7 @@ struct Editor(Copyable, Movable):
         """Build ``_hl_order`` / ``_hl_row_start``: a counting sort of
         ``highlights`` by row, O(highlights + rows)."""
         var n_rows = self.buffer.line_count()
-        var start = List[Int](length=n_rows + 1, fill=0)
+        var start = List[Int32](length=n_rows + 1, fill=0)
         var n = len(self.highlights)
         var in_order = True
         var prev = 0
@@ -2377,8 +2384,8 @@ struct Editor(Copyable, Movable):
             return
         var fill = List[Int](capacity=n_rows)
         for r in range(n_rows):
-            fill.append(start[r])
-        var order = List[Int](length=start[n_rows], fill=0)
+            fill.append(Int(start[r]))
+        var order = List[Int](length=Int(start[n_rows]), fill=0)
         for i in range(n):
             var r = self.highlights.row(i)
             if 0 <= r and r < n_rows:
@@ -2402,7 +2409,9 @@ struct Editor(Copyable, Movable):
             return (0, len(self.highlights))
         if row < 0 or row + 1 >= len(self._hl_row_start):
             return (0, 0)
-        return (self._hl_row_start[row], self._hl_row_start[row + 1])
+        return (
+            Int(self._hl_row_start[row]), Int(self._hl_row_start[row + 1]),
+        )
 
     def _hl_at(self, k: Int) -> Int:
         """The ``highlights`` index at position ``k`` of a ``_hl_rows``
@@ -2507,9 +2516,9 @@ struct Editor(Copyable, Movable):
         covers the next row too, so suppression is reapplied over the
         whole buffer from the cached per-row flags each time."""
         self.spell_highlights = List[Highlight]()
-        self.spell_lines = List[Bool]()
-        for _ in range(self.buffer.line_count()):
-            self.spell_lines.append(False)
+        self.spell_lines = List[Bool](
+            length=self.buffer.line_count(), fill=False,
+        )
         if not speller.is_loaded():
             return
         # The stored attr only carries the squiggle: paint layers its
@@ -2525,9 +2534,11 @@ struct Editor(Copyable, Movable):
             # Plain underline takes the fg color, so paint the word red
             # to make the flag visible at all.
             squiggle = Attr(LIGHT_RED, EDITOR_BG, STYLE_UNDERLINE)
-        if self._spell_version != speller.word_version():
+        if self._spell_version != speller.word_version() \
+                or len(self._spell_run_start) != len(self._spell_text) + 1:
             self._spell_text = List[String]()
-            self._spell_runs = List[List[Tuple[Int, Int]]]()
+            self._spell_run_start = List[Int32]()
+            self._spell_run_cols = List[Int32]()
             self._spell_directive = List[Bool]()
             self._spell_version = speller.word_version()
         ref lines = self.buffer.lines
@@ -2545,47 +2556,67 @@ struct Editor(Copyable, Movable):
         while suf < n - pre and suf < old_n - pre \
                 and _same_text(lines[n - 1 - suf], self._spell_text[old_n - 1 - suf]):
             suf += 1
+        # The runs: the unchanged rows' copied across, the rows between
+        # re-checked. Rebuilt whole each time — a few integers a row.
+        var old_start = List[Int32]()
+        var old_cols = List[Int32]()
+        swap(old_start, self._spell_run_start)
+        swap(old_cols, self._spell_run_cols)
+        var run_start = List[Int32](capacity=n + 1)
+        var run_cols = List[Int32](capacity=len(old_cols) + 16)
+        run_start.append(0)
+        for r in range(pre):
+            for k in range(Int(old_start[r]), Int(old_start[r + 1])):
+                run_cols.append(old_cols[k])
+            run_start.append(Int32(len(run_cols)))
+        for r in range(pre, n - suf):
+            var found = find_misspelled_runs(speller, lines[r])
+            for k in range(len(found)):
+                run_cols.append(Int32(found[k][0]))
+                run_cols.append(Int32(found[k][1]))
+            run_start.append(Int32(len(run_cols)))
+        for r in range(old_n - suf, old_n):
+            for k in range(Int(old_start[r]), Int(old_start[r + 1])):
+                run_cols.append(old_cols[k])
+            run_start.append(Int32(len(run_cols)))
+        self._spell_run_start = run_start^
+        self._spell_run_cols = run_cols^
         if n == old_n:
-            # Same row count (typing, in-place edits): re-check the
-            # changed rows where they are — no per-edit list rebuild.
+            # Same row count (typing, in-place edits): the changed rows'
+            # text and flags are updated where they are.
             for r in range(pre, n - suf):
                 self._spell_text[r] = lines[r]
-                self._spell_runs[r] = find_misspelled_runs(speller, lines[r])
                 self._spell_directive[r] = has_spell_noinspection_directive(lines[r])
         else:
             var text = List[String](capacity=n)
-            var runs = List[List[Tuple[Int, Int]]](capacity=n)
             var directive = List[Bool](capacity=n)
             for r in range(pre):
-                # Taken from the lists being replaced, not copied.
+                # Taken from the list being replaced, not copied.
                 text.append(String())
                 swap(text[len(text) - 1], self._spell_text[r])
-                runs.append(List[Tuple[Int, Int]]())
-                swap(runs[len(runs) - 1], self._spell_runs[r])
                 directive.append(self._spell_directive[r])
             for r in range(pre, n - suf):
                 text.append(lines[r])
-                runs.append(find_misspelled_runs(speller, lines[r]))
                 directive.append(has_spell_noinspection_directive(lines[r]))
             for r in range(old_n - suf, old_n):
                 text.append(String())
                 swap(text[len(text) - 1], self._spell_text[r])
-                runs.append(List[Tuple[Int, Int]]())
-                swap(runs[len(runs) - 1], self._spell_runs[r])
                 directive.append(self._spell_directive[r])
             self._spell_text = text^
-            self._spell_runs = runs^
             self._spell_directive = directive^
         for row in range(n):
             if self._spell_directive[row] \
                     or (row > 0 and self._spell_directive[row - 1]):
                 continue
-            ref row_runs = self._spell_runs[row]
-            for k in range(len(row_runs)):
-                self.spell_highlights.append(
-                    Highlight(row, row_runs[k][0], row_runs[k][1], squiggle)
-                )
+            var k = Int(self._spell_run_start[row])
+            var k_end = Int(self._spell_run_start[row + 1])
+            while k < k_end:
+                self.spell_highlights.append(Highlight(
+                    row, Int(self._spell_run_cols[k]),
+                    Int(self._spell_run_cols[k + 1]), squiggle,
+                ))
                 self.spell_lines[row] = True
+                k += 2
 
     def invalidate_spell(mut self):
         """Force ``flush_highlights`` to rerun ``_refresh_spell`` on
@@ -4743,7 +4774,12 @@ struct Editor(Copyable, Movable):
         var n = self.buffer.line_count()
         if n == 0:
             return String("")
-        var buf = List[UInt8]()
+        # Sized up front: grown by doubling, the buffer left as much again
+        # behind in outgrown blocks on every snapshot of a large file.
+        var total = n
+        for i in range(n):
+            total += len(self.buffer.line(i).as_bytes())
+        var buf = List[UInt8](capacity=total)
         for i in range(n):
             if i > 0:
                 buf.append(UInt8(0x0A))
@@ -4812,7 +4848,13 @@ struct Editor(Copyable, Movable):
         # Accumulate into a byte buffer (same O(N) reason as
         # ``text_snapshot``): ``out = out + line`` reallocates the whole
         # payload per line, which is O(N²) on a large file at save time.
-        var buf = List[UInt8]()
+        # Sized up front (trimming only shortens a line), for the same
+        # reason as in ``text_snapshot``.
+        var total = 0
+        var sep_n = len(sep.as_bytes())
+        for i in range(n):
+            total += len(self.buffer.line(i).as_bytes()) + sep_n
+        var buf = List[UInt8](capacity=total + sep_n)
         for i in range(emit_count):
             var line: String
             if i < n:
@@ -5145,7 +5187,7 @@ struct Editor(Copyable, Movable):
         """Replace the blame attribution list and turn the blame
         gutter on. Pass an empty list to clear the cache (the gutter
         also auto-hides when there's nothing to show)."""
-        self.blame_lines = lines^
+        self.blame_lines = BlameTable.from_lines(lines)
         self.blame_visible = True
 
     def toggle_blame(mut self):
@@ -7296,7 +7338,7 @@ struct Editor(Copyable, Movable):
                 if bl_gutter > 0 and is_first_seg \
                         and buf_row >= 0 \
                         and buf_row < len(self.blame_lines):
-                    ref bl = self.blame_lines[buf_row]
+                    var bl = self.blame_lines[buf_row]
                     var bx = view.a.x + g.blame_x()
                     # Blame columns: clip to ``[bx, bx + bl_gutter)``
                     # via a sub-painter so a long author/commit can't
@@ -7369,7 +7411,7 @@ struct Editor(Copyable, Movable):
             if self._hl_indexed():
                 var in_order = len(self._hl_order) == 0
                 for r in range(vis_lo, min(vis_hi + 1, len(self._hl_row_start) - 1)):
-                    for k in range(self._hl_row_start[r], self._hl_row_start[r + 1]):
+                    for k in range(Int(self._hl_row_start[r]), Int(self._hl_row_start[r + 1])):
                         hl_buckets[r - vis_lo].append(
                             k if in_order else self._hl_order[k],
                         )
