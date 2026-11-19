@@ -2268,6 +2268,57 @@ def test_markdown_fenced_code_uses_embedded_grammar() raises:
     assert_true(saw_number)
 
 
+def test_grammar_compiles_its_regexes_on_first_use() raises:
+    """Loading a grammar compiles nothing; tokenizing compiles what the
+    text reaches, once — a ``begin`` together with its ``end`` — and a
+    pattern nested in a scope the text never opens stays uncompiled. A
+    regex libonig rejects takes its partner down with it, so a ``begin``
+    can't open a scope its ``end`` could never close."""
+    onig_global_init()
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        "{\"match\": \"\\\\bkw\\\\b\", \"name\": \"keyword.test\"},"
+        "{\"begin\": \"<<\", \"end\": \">>\", \"name\": \"string.test\","
+        " \"patterns\": [{\"match\": \"[0-9]+\", \"name\": \"constant.numeric.test\"}]},"
+        "{\"begin\": \"@@\", \"end\": \"(\", \"name\": \"comment.test\"}"
+        "], \"repository\": {}}"
+    )
+    var before = onig_tracked_count()
+    var g = load_grammar_from_string(grammar_json)
+    assert_equal(onig_tracked_count(), before)
+    var lines = List[String]()
+    lines.append(String("kw plain 12"))
+    var hls = tokenize_with_grammar(g, lines)
+    assert_equal(len(hls), 1)
+    # The match and the good begin/end pair; not the pattern nested in
+    # the scope nothing opened, nor the pair with the uncompilable end.
+    assert_equal(onig_tracked_count(), before + 3)
+    _ = tokenize_with_grammar(g, lines)
+    assert_equal(onig_tracked_count(), before + 3)
+    # Opening the scope compiles its nested pattern.
+    lines.append(String("<< 34 >>"))
+    var hls2 = tokenize_with_grammar(g, lines)
+    assert_true(len(hls2) > 1)
+    assert_equal(onig_tracked_count(), before + 4)
+    # ``@@`` would match, but its ``end`` is rejected: the pair is dead,
+    # so the rest of the line still tokenizes as usual.
+    lines.append(String("@@ kw"))
+    var hls3 = tokenize_with_grammar(g, lines).to_list()
+    assert_equal(onig_tracked_count(), before + 4)
+    var saw_kw = False
+    for i in range(len(hls3)):
+        if hls3[i].row == 2:
+            assert_true(hls3[i].attr == highlight_keyword_attr())
+            assert_equal(hls3[i].col_start, 3)
+            saw_kw = True
+    assert_true(saw_kw)
+    g.release()
+    assert_equal(onig_tracked_count(), before)
+    # Released: matches nothing, and compiles nothing afresh.
+    assert_equal(len(tokenize_with_grammar(g, lines)), 0)
+    assert_equal(onig_tracked_count(), before)
+
+
 def test_backreference_end_regexes_are_released_per_line() raises:
     """Tokenizing a back-referencing grammar leaves no libonig handles.
 
@@ -2287,12 +2338,14 @@ def test_backreference_end_regexes_are_released_per_line() raises:
         "], \"repository\": {}}"
     )
     var g = load_grammar_from_string(grammar_json)
-    # Baseline *after* the grammar is compiled: its own pattern regexes
-    # are owned by the Grammar and released with it, not per line.
-    var live = onig_tracked_count()
     var lines = List[String]()
     for i in range(40):
         lines.append(String("<div>row") + String(i) + String("</div>"))
+    # Baseline *after* the grammar's own pattern regexes are compiled
+    # (which the first use does): those are owned by the Grammar and
+    # released with it, not per line.
+    _ = tokenize_with_grammar(g, lines)
+    var live = onig_tracked_count()
     var hls = tokenize_with_grammar(g, lines).to_list()
     assert_true(len(hls) > 0)
     # One distinct substituted end regex per line, all handed back.

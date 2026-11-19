@@ -419,7 +419,7 @@ def _tokenize_line_scan(
                 if cands[ci].pattern_idx < 0 and dyn_end:
                     m_opt = dyn_end.value().search_at(line, pos, search_options)
                 else:
-                    ref rx = grammar.regexes[cands[ci].regex_idx]
+                    var rx = grammar.regex(cands[ci].regex_idx)
                     m_opt = rx.search_at(line, pos, search_options)
                 if m_opt:
                     cached_match[ci] = m_opt.value().copy()
@@ -584,7 +584,7 @@ def _tokenize_line_scan(
         if dyn:
             m_opt = dyn.value().search_at(line_nl, n)
         else:
-            m_opt = grammar.regexes[top_pat.end_idx].search_at(line_nl, n)
+            m_opt = grammar.regex(top_pat.end_idx).search_at(line_nl, n)
         if not m_opt:
             break
         var m = m_opt.value().copy()
@@ -685,7 +685,7 @@ def _process_while_frames(
             # alone (rare but legal).
             idx += 1
             continue
-        var rx = grammar.regexes[pat.end_idx]
+        var rx = grammar.regex(pat.end_idx)
         var m_opt = rx.search_at(line, pos)
         var matched = False
         if m_opt:
@@ -793,7 +793,7 @@ def _emit_capture_subtokens(
                 # are out of scope for this minimal path. Skip
                 # gracefully — most grammars use match-only here.
                 continue
-            var rx = grammar.regexes[pat.match_idx]
+            var rx = grammar.regex(pat.match_idx)
             var m_opt = rx.search_at(sub, pos)
             if not m_opt:
                 continue

@@ -268,6 +268,13 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         # Mojo (see the struct doc-comment for the lifecycle saga).
         _ = external_call["tk_onig_track", Int](self._reg, self._region)
 
+    def __init__(out self, *, never: Bool):
+        """A regex that matches nothing and holds no handles — what a
+        released one becomes. A placeholder for one not compiled yet, or
+        one whose pattern libonig rejected."""
+        self._reg = 0
+        self._region = 0
+
     def release(mut self):
         """Free this regex's libonig handles now instead of at exit.
 

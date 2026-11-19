@@ -190,11 +190,27 @@ struct Grammar(Copyable, Movable):
     Resolves ``include`` references at tokenize time rather than
     load time so circular refs (which the Rust grammar's nested
     block comments use) don't trip an infinite loop here.
+
+    Regexes are compiled the first time the tokenizer asks for one
+    (``regex``), not at load: a grammar's compiled patterns are megabytes
+    of libonig handles, and a file only reaches the ones in the scopes it
+    actually opens — never, say, the CSS and JavaScript grammars an HTML
+    file without a ``<style>`` or ``<script>`` embeds.
     """
     var scope_name: String
     var root_patterns: List[Int]
     var patterns: List[Pattern]
     var regexes: List[OnigRegex]
+    """One slot per regex, matching nothing until ``regex`` compiles it."""
+    var regex_sources: List[String]
+    var regex_partner: List[Int]
+    """The other regex of a ``begin``/``end`` (or ``while``) pair, -1 for
+    a ``match``. A pair is compiled together, and is dead together when
+    libonig rejects either half: a ``begin`` that could match with an
+    ``end`` that never can would leave its scope open to the end of the
+    file."""
+    var _regex_done: List[UInt8]
+    """1 once ``regex`` has settled a slot — compiled, or found dead."""
     # Parallel arrays for the repository: ``repo_keys[i]`` resolves
     # to ``repo_pattern_idxs[i]``. Linear lookup; the table is small
     # (typically 50–200 entries even for a fat grammar) so a hash
@@ -212,7 +228,8 @@ struct Grammar(Copyable, Movable):
         var scope_name: String,
         var root_patterns: List[Int],
         var patterns: List[Pattern],
-        var regexes: List[OnigRegex],
+        var regex_sources: List[String],
+        var regex_partner: List[Int],
         var repo_keys: List[String],
         var repo_pattern_idxs: List[Int],
         var external_scopes: List[String] = List[String](),
@@ -221,7 +238,12 @@ struct Grammar(Copyable, Movable):
         self.scope_name = scope_name^
         self.root_patterns = root_patterns^
         self.patterns = patterns^
-        self.regexes = regexes^
+        self.regexes = List[OnigRegex](capacity=len(regex_sources))
+        self._regex_done = List[UInt8](length=len(regex_sources), fill=0)
+        for _ in range(len(regex_sources)):
+            self.regexes.append(OnigRegex(never=True))
+        self.regex_sources = regex_sources^
+        self.regex_partner = regex_partner^
         self.repo_keys = repo_keys^
         self.repo_pattern_idxs = repo_pattern_idxs^
         self.external_scopes = external_scopes^
@@ -235,11 +257,15 @@ struct Grammar(Copyable, Movable):
         # shim's registry is the sole owner of those handles, so the
         # aliasing is benign — copies don't multiply the libonig
         # allocations. It does mean ``release`` is a whole-grammar
-        # operation, not something a copy may do on its own.
+        # operation, not something a copy may do on its own. (A regex
+        # neither side had compiled yet is compiled by each on its own.)
         self.scope_name = copy.scope_name
         self.root_patterns = copy.root_patterns.copy()
         self.patterns = copy.patterns.copy()
         self.regexes = copy.regexes.copy()
+        self.regex_sources = copy.regex_sources.copy()
+        self.regex_partner = copy.regex_partner.copy()
+        self._regex_done = copy._regex_done.copy()
         self.repo_keys = copy.repo_keys.copy()
         self.repo_pattern_idxs = copy.repo_pattern_idxs.copy()
         var ext_roots_copy = List[List[Int]]()
@@ -263,6 +289,43 @@ struct Grammar(Copyable, Movable):
         """
         for i in range(len(self.regexes)):
             self.regexes[i].release()
+            # Settled, as matching nothing: a use after this must not
+            # compile the regex afresh and strand it.
+            self._regex_done[i] = 1
+
+    def regex(self, idx: Int) -> OnigRegex:
+        """Regex ``idx``, compiled now if this is its first use (with its
+        ``regex_partner``). One libonig rejects — look-behind quantifier
+        weirdness, named-group syntax it doesn't recognize — matches
+        nothing, so the pattern is dead rather than the whole grammar.
+
+        Fills the slot in place through a raw pointer: the tokenizer
+        holds the grammar immutably (and the store that owns it is shared
+        by every window), and what's written is a cache of what
+        ``regex_sources`` already says."""
+        var done = Pointer[UInt8, MutUntrackedOrigin](
+            unsafe_from_address=Int(self._regex_done.unsafe_ptr()),
+        )
+        var slots = Pointer[OnigRegex, MutUntrackedOrigin](
+            unsafe_from_address=Int(self.regexes.unsafe_ptr()),
+        )
+        if done[unsafe_offset=idx] == 0:
+            var other = self.regex_partner[idx]
+            var a = OnigRegex(never=True)
+            var b = OnigRegex(never=True)
+            try:
+                a = OnigRegex(self.regex_sources[idx])
+                if other >= 0:
+                    b = OnigRegex(self.regex_sources[other])
+            except:
+                a.release()
+                b.release()
+            slots[unsafe_offset=idx] = a
+            done[unsafe_offset=idx] = 1
+            if other >= 0:
+                slots[unsafe_offset=other] = b
+                done[unsafe_offset=other] = 1
+        return slots[unsafe_offset=idx]
 
     def lookup_repo(self, key: String) -> Int:
         """Repository key → pattern index. Returns -1 if unknown."""
@@ -346,7 +409,8 @@ struct _GrammarBuild(Movable):
     grammars' roots, and the chain of scopes being loaded (so a circular
     external include can't recurse forever)."""
     var patterns: List[Pattern]
-    var regexes: List[OnigRegex]
+    var regex_sources: List[String]
+    var regex_partner: List[Int]
     var repo_keys: List[String]
     var repo_idxs: List[Int]
     var external_scopes: List[String]
@@ -355,7 +419,8 @@ struct _GrammarBuild(Movable):
 
     def __init__(out self):
         self.patterns = List[Pattern]()
-        self.regexes = List[OnigRegex]()
+        self.regex_sources = List[String]()
+        self.regex_partner = List[Int]()
         self.repo_keys = List[String]()
         self.repo_idxs = List[Int]()
         self.external_scopes = List[String]()
@@ -367,7 +432,8 @@ struct _GrammarBuild(Movable):
     ) -> Grammar:
         """The finished grammar, its tables moved out of the build."""
         return Grammar(
-            scope_name^, root_patterns^, self.patterns^, self.regexes^,
+            scope_name^, root_patterns^, self.patterns^,
+            self.regex_sources^, self.regex_partner^,
             self.repo_keys^, self.repo_idxs^, self.external_scopes^,
             self.external_roots^,
         )
@@ -541,26 +607,22 @@ def _compile_pattern(
     var mi = node.object_index(String("match"))
     if mi >= 0:
         var pat_str = node.obj_v[mi].value.as_str()
-        # libonig occasionally rejects a regex from a real grammar
-        # (look-behind quantifier weirdness, named-group syntax it
-        # doesn't recognize, ...). Treat compile failure as "this
-        # pattern is dead" rather than failing the whole load —
-        # surrounding patterns still light up.
-        try:
-            var rx = OnigRegex(pat_str)
-            b.regexes.append(rx^)
-            var match_idx = len(b.regexes) - 1
-            var caps = _parse_captures(
-                node, String("captures"), b, scope_prefix,
-            )
-            b.patterns.append(Pattern(
-                PATTERN_MATCH, name_str^, content_name^, match_idx, -1,
-                List[Int](), String(""),
-                caps^, List[Capture](),
-            ))
-            return len(b.patterns) - 1
-        except:
-            return _append_dead_pattern(b.patterns)
+        # Not compiled here: ``Grammar.regex`` does that on first use,
+        # and a regex libonig rejects then just never matches — "this
+        # pattern is dead" rather than a failed load, with the
+        # surrounding patterns still lighting up.
+        b.regex_sources.append(pat_str)
+        b.regex_partner.append(-1)
+        var match_idx = len(b.regex_sources) - 1
+        var caps = _parse_captures(
+            node, String("captures"), b, scope_prefix,
+        )
+        b.patterns.append(Pattern(
+            PATTERN_MATCH, name_str^, content_name^, match_idx, -1,
+            List[Int](), String(""),
+            caps^, List[Capture](),
+        ))
+        return len(b.patterns) - 1
 
     var bi = node.object_index(String("begin"))
     if bi >= 0:
@@ -581,20 +643,14 @@ def _compile_pattern(
         else:
             second_str = node.obj_v[wi].value.as_str()
             pattern_kind = PATTERN_BEGIN_WHILE
-        # Same defensive compile as the ``match`` branch — if either
-        # the begin or the second-side regex won't compile, drop the
-        # pattern instead of failing the whole grammar load.
-        var begin_idx: Int
-        var end_idx: Int
-        try:
-            var begin_rx = OnigRegex(begin_str)
-            b.regexes.append(begin_rx^)
-            begin_idx = len(b.regexes) - 1
-            var second_rx = OnigRegex(second_str)
-            b.regexes.append(second_rx^)
-            end_idx = len(b.regexes) - 1
-        except:
-            return _append_dead_pattern(b.patterns)
+        # A pair: compiled together on first use, and dead together if
+        # libonig rejects either side (``Grammar.regex_partner``).
+        var begin_idx = len(b.regex_sources)
+        var end_idx = begin_idx + 1
+        b.regex_sources.append(begin_str)
+        b.regex_partner.append(end_idx)
+        b.regex_sources.append(second_str)
+        b.regex_partner.append(begin_idx)
 
         # Nested patterns must be compiled before the parent is
         # appended so we know each child's index.
