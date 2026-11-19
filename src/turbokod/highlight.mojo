@@ -767,7 +767,7 @@ def _fallback_with_overlays(
     ext: String, cache_key: String, lines: List[String],
     mut registry: GrammarRegistry,
 ) -> HighlightList:
-    var fb = HighlightList.from_list(_fallback_for_extension(ext, lines))
+    var fb = _fallback_for_extension(ext, lines)
     _apply_overlays(ext, cache_key, lines, fb, registry)
     return fb^
 
@@ -907,18 +907,24 @@ def _full_retokenize(
     # backed by memory, where trimming to fit would write a second copy.
     var hint = len(cache.highlights)
     if hint == 0:
-        var bytes = 0
-        for i in range(len(lines)):
-            bytes += lines[i].byte_length()
-        hint = bytes // 8
+        hint = _size_hint(lines)
     cache.highlights = tokenize_with_grammar_full(
         grammar, lines, cache.stacks, cache.post_stacks, hint + 64,
     )
 
 
+def _size_hint(lines: List[String]) -> Int:
+    """Room to make for the highlights of ``lines`` when there's no
+    earlier pass to go by: one per 8 bytes of text, generous for code."""
+    var bytes = 0
+    for i in range(len(lines)):
+        bytes += lines[i].byte_length()
+    return bytes // 8
+
+
 def _fallback_for_extension(
     ext: String, lines: List[String],
-) -> List[Highlight]:
+) -> HighlightList:
     """The "no TextMate grammar usable" branch shared by the
     incremental + non-incremental cached entry points: defer to
     the generic per-language tokenizer registry, then return
@@ -928,7 +934,7 @@ def _fallback_for_extension(
     var spec_opt = _lang_spec_for_ext(ext)
     if spec_opt:
         return _highlight_generic(lines, spec_opt.value())
-    return List[Highlight]()
+    return HighlightList()
 
 
 def _has_nonempty_line(lines: List[String]) -> Bool:
@@ -1612,7 +1618,7 @@ def _md_find_tick_close(line: String, frm: Int, ticks: Int) -> Int:
 
 
 def _md_try_emphasis(
-    line: String, row: Int, i: Int, mut out: List[Highlight],
+    line: String, row: Int, i: Int, mut out: HighlightList,
 ) -> Int:
     """Try to color a ``*``/``_`` emphasis span starting at ``i``. Two
     markers → bold, one → italic. Returns bytes consumed, or 0 if it
@@ -1653,7 +1659,7 @@ def _md_try_emphasis(
 
 
 def _md_try_link(
-    line: String, row: Int, i: Int, mut out: List[Highlight],
+    line: String, row: Int, i: Int, mut out: HighlightList,
 ) -> Int:
     """Try to color a ``[text](url)`` or ``![alt](url)`` link starting at
     ``i``: link text gets the link-text attr, the URL the url attr.
@@ -1699,7 +1705,7 @@ def _md_try_link(
 
 
 def _md_inline(
-    line: String, row: Int, start: Int, mut out: List[Highlight],
+    line: String, row: Int, start: Int, mut out: HighlightList,
 ):
     """Scan the inline span ``[start, eol)`` for code, emphasis, and
     links. Plain text is left uncolored (the editor paints it as the
@@ -1738,9 +1744,9 @@ def _md_inline(
         i += 1
 
 
-def _highlight_markdown(lines: List[String]) -> List[Highlight]:
+def _highlight_markdown(lines: List[String]) -> HighlightList:
     """Bespoke Markdown highlighter — see the section comment above."""
-    var out = List[Highlight]()
+    var out = HighlightList(capacity=_size_hint(lines))
     var in_fence = False
     var fence_char = UInt8(0)
     var fence_len = 0
@@ -1813,8 +1819,8 @@ def _highlight_markdown(lines: List[String]) -> List[Highlight]:
 
 def _highlight_generic(
     lines: List[String], spec: LangSpec,
-) -> List[Highlight]:
-    var out = List[Highlight]()
+) -> HighlightList:
+    var out = HighlightList(capacity=_size_hint(lines))
     var state = _HL_NORMAL
     for row in range(len(lines)):
         state = _highlight_generic_line(lines[row], row, state, spec, out)
@@ -1823,7 +1829,7 @@ def _highlight_generic(
 
 def _highlight_generic_line(
     line: String, row: Int, state_in: Int, spec: LangSpec,
-    mut out: List[Highlight],
+    mut out: HighlightList,
 ) -> Int:
     """Single-line tokenizer driven by ``spec``. Returns the post-line
     state so block comments can span multiple lines without us having
