@@ -189,6 +189,19 @@ while the picker is *already open* is not noticed until the next sweep.
 The old per-keystroke rg would have seen it. Mechanism 5 is what keeps
 the consequence to a wasted text scan rather than a wrong jump.
 
+## When a server doesn't answer
+
+Submitting a row asks every ready language server for `workspace/symbol`
+and waits for all of them. The wait has a deadline
+(`_FIND_SYMBOL_LSP_TIMEOUT_MS`, 1.5 s): a server that is alive but never
+replies would otherwise hold the picker on "Resolving … via LSP…" for
+good, since Enter is ignored while a lookup is pending. Past it — or as
+soon as a server fails or is retired — the lookup settles with what the
+others returned, which is the verified seed when that is nothing, and the
+status bar names the server that stayed silent. A server already known to
+be silent (`LspManager.is_unresponsive`) isn't asked at all. See
+[lsp-conformance.md](lsp-conformance.md#a-server-that-stops-answering).
+
 ## Which occurrence is the seed
 
 A name occurs in many files; its picker row carries one location. That

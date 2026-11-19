@@ -192,6 +192,37 @@ Three callers, three different "later":
   quiet, because the common case finishes in single-digit milliseconds and
   flashing a box on every quit would be worse than the silence it replaces.
 
+## A server that stops answering
+
+A language server can be alive, its pipes open and its manager READY while
+it reads nothing. ty did exactly that: its main loop blocked handing a job
+to a full worker queue while every worker was blocked handing a response
+back to the main loop, so the stdin reader blocked behind them. Nothing
+exits, so crash detection never fires, and nothing answers.
+
+Two things follow, and both are tested against a scripted server that
+takes a request and never replies (`workspace_symbol_hangs.json`):
+
+- **Anything that waits on a reply needs a deadline.** A submitted Find
+  Symbol waited on `workspace/symbol` with none, and since the picker
+  ignores Enter while a lookup is pending it sat on "Resolving … via LSP…"
+  until Esc. `Desktop._expire_find_symbol_lsps` now drops a server that
+  failed or was retired at once, and any still silent after
+  `_FIND_SYMBOL_LSP_TIMEOUT_MS`, then settles on the verified text match
+  and says which server didn't answer. The quick-fix menu
+  (`_CA_RESOLVE_TIMEOUT_MS`) and the spelling library probes
+  (`_LIBPROBE_TIMEOUT_MS`) already worked this way.
+- **The status bar must not say "ready".** `LspManager` keeps the requests
+  the server still owes an answer (`_awaited`: added in `_send_request`,
+  settled by the response or by our own `$/cancelRequest`) and when it last
+  sent anything. `unresponsive_secs()` reports the oldest unanswered
+  request sent *after* the server's last message once that passes
+  `_UNRESPONSIVE_MS`; the indicator then reads `not responding (12s)`, and
+  Find Symbol skips that server instead of sitting out its deadline on
+  every lookup. Silence is the test, not an unanswered request: a server
+  that drops one request but keeps talking is not flagged, and the first
+  message from a flagged one clears it.
+
 ## Position encoding
 
 The bug that prompted all of this, and the reason layer 2 exists.

@@ -132,6 +132,15 @@ comptime _LOG_CAP = 16 * 1024
 # exists so a server that never answers can't grow the list forever.
 comptime _REQ_URI_RING = 64
 
+# A server that has sent nothing at all since a request went out this long
+# ago is reported as not responding (the status bar says so, and Find
+# Symbol stops asking it). Long enough that a slow answer on a quiet
+# server isn't one: anything that slow is worth saying anyway, and the
+# report clears with the next message.
+comptime _UNRESPONSIVE_MS = 10_000
+# Bound on the unanswered requests remembered for that.
+comptime _AWAITED_MAX = 64
+
 # Bounds on the shutdown handshake. It is a *poll* state machine
 # (``begin_shutdown`` / ``shutdown_poll`` / ``finish_shutdown``) rather than a
 # blocking wait, because closing a window must be instant: the host retires
@@ -179,6 +188,13 @@ struct _IdText(Copyable, Movable):
     diagnostic's path, a request's document URI, a queued open's text."""
     var key: String
     var text: String
+
+
+@fieldwise_init
+struct _Awaited(Copyable, Movable):
+    """A request the server still owes an answer, and when it went out."""
+    var id: String
+    var sent_ms: Int
 
 
 @fieldwise_init
@@ -873,6 +889,14 @@ struct LspManager(Copyable, Movable):
     # ones added later — gets it for free. Bounded ring: a response we
     # never see would otherwise leak an entry per request.
     var _req_uris: List[_IdText]
+    # The requests the server hasn't answered, oldest first, and when it
+    # last sent anything: together they tell a server that is slow from
+    # one that has stopped answering (``unresponsive_secs``). A process
+    # can be alive, its pipes open and its state READY while it reads
+    # nothing — ty deadlocked that way, and every request then waited
+    # forever behind a status bar saying "ready".
+    var _awaited: List[_Awaited]
+    var _last_rx_ms: Int
     # Server-driven invalidation (``workspace/*/refresh``). The server tells
     # us its previous answers for a whole class of feature are stale — after
     # a build finishes, a dependency resolves, a config file changes. We used
@@ -1229,6 +1253,8 @@ struct LspManager(Copyable, Movable):
         self._position_enc = encoding_from_name(String("utf-16"))
         self._remap = _PositionRemapper(POS_UTF8)
         self._req_uris = List[_IdText]()
+        self._awaited = List[_Awaited]()
+        self._last_rx_ms = 0
         self._refresh_doc_features = False
         self._refresh_diagnostics = False
         self._close_stage = _CLOSE_IDLE
@@ -1644,6 +1670,10 @@ struct LspManager(Copyable, Movable):
         if tdi >= 0:
             uri = json_get_string(params.obj_v[tdi].value, String("uri"))
         var id = self._send_wire(method, params, True)
+        if len(id.as_bytes()) > 0:
+            if len(self._awaited) >= _AWAITED_MAX:
+                _ = self._awaited.pop(0)
+            self._awaited.append(_Awaited(id, monotonic_ms()))
         # Only a non-utf-8 encoding remaps responses (see the dispatch's
         # ``_take_req_uri``), so under utf-8 there's nothing to remember.
         if self._position_enc != POS_UTF8 \
@@ -1661,6 +1691,35 @@ struct LspManager(Copyable, Movable):
             if self._req_uris[i].key == id:
                 return self._req_uris.pop(i).text
         return String("")
+
+    def _settle_awaited(mut self, id: String):
+        """``id`` is no longer owed an answer: it came, or we cancelled
+        the request (a server may answer a cancelled one or not)."""
+        for i in range(len(self._awaited)):
+            if self._awaited[i].id == id:
+                _ = self._awaited.pop(i)
+                return
+
+    def unresponsive_secs(self) -> Int:
+        """Whole seconds the server has been silent with a request
+        waiting, once that passes ``_UNRESPONSIVE_MS``; -1 otherwise.
+
+        Counted from the oldest unanswered request sent *after* the
+        server's last message, so a request it simply never answers
+        doesn't count while it keeps talking — only silence does."""
+        if self.state != _STATE_READY:
+            return -1
+        for i in range(len(self._awaited)):
+            if self._awaited[i].sent_ms < self._last_rx_ms:
+                continue
+            var waited = monotonic_ms() - self._awaited[i].sent_ms
+            if waited >= _UNRESPONSIVE_MS:
+                return waited // 1000
+            return -1
+        return -1
+
+    def is_unresponsive(self) -> Bool:
+        return self.unresponsive_secs() >= 0
 
     def _send_notification(mut self, method: String, params: JsonValue) raises:
         """Outbound-notification twin of ``_send_request``."""
@@ -2709,6 +2768,7 @@ struct LspManager(Copyable, Movable):
         a notification (no response), so a send failure is logged with
         ``context`` and otherwise ignored — if the server already returned,
         the cancel is a no-op anyway."""
+        self._settle_awaited(request_id)
         var cancel_params = json_object()
         cancel_params.put(String("id"), json_str(request_id))
         self._notify(String("$/cancelRequest"), cancel_params, context)
@@ -3923,6 +3983,7 @@ struct LspManager(Copyable, Movable):
             if not maybe:
                 return resolved
             var msg = maybe.take()
+            self._last_rx_ms = monotonic_ms()
             if msg.kind == LSP_NOTIFICATION:
                 if msg.method and msg.params:
                     var method = msg.method.value()
@@ -3969,6 +4030,7 @@ struct LspManager(Copyable, Movable):
             var id = json_rpc_id(msg.id.value())
             if len(id.as_bytes()) == 0:
                 continue
+            self._settle_awaited(id)
             if self.state == _STATE_INITIALIZING and id == self._init_id:
                 self._on_initialize_response(msg)
                 continue

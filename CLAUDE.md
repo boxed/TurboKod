@@ -338,6 +338,13 @@ for both:
   which parks the manager on `_closing_lsp` for `process_external_changes` to
   drain.
 
+A third, from a ty deadlock: **a server can be READY, alive and silent**,
+so anything that waits on a reply needs a deadline (Find Symbol's
+`_expire_find_symbol_lsps`, the code-action resolves, the library probes)
+and falls back to what it has. `LspManager.unresponsive_secs()` is how a
+feature — and the status bar, which then says `not responding` rather than
+`ready` — tells silence from slowness.
+
 ### One server for every window
 
 In the native app windows share language servers: `Desktop.lsp_pool` (one

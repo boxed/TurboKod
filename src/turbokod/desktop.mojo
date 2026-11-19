@@ -357,6 +357,13 @@ few-thousand-file project revalidates in a single frame. The sweep gates
 ``is_ready``, and every frame it spans is a frame the picker answers with
 ``rg`` instead, so stretching it thin is the wrong trade."""
 
+comptime _FIND_SYMBOL_LSP_TIMEOUT_MS: Int = 1500
+"""How long a submitted Find Symbol waits on the language servers'
+``workspace/symbol`` before settling with what it has — the verified
+text match, when nobody answered. A live server answers in a fraction
+of that; one that never does (wedged, deadlocked) used to leave the
+picker on "Resolving … via LSP…" for good."""
+
 comptime FIND_SYMBOL_RESULT_CAP: Int = 500
 """Rows one Find Symbol query may return.
 
@@ -1158,6 +1165,9 @@ struct Desktop(Movable):
     # the last response lands. Empty list means "no Find Symbol
     # request in flight".
     var _find_symbol_pending_lsps: List[Int]
+    # When to stop waiting on them (``monotonic_ms``): see
+    # ``_FIND_SYMBOL_LSP_TIMEOUT_MS``.
+    var _find_symbol_deadline_ms: Int
     # Items accumulated from already-responded LSPs while we still
     # wait on the rest of ``_find_symbol_pending_lsps``. Drained
     # into ``_resolve_find_symbol_workspace`` once the pending list
@@ -2000,6 +2010,7 @@ struct Desktop(Movable):
         self.symbol_index = SymbolIndex()
         self._symbol_index_root = String("")
         self._find_symbol_pending_lsps = List[Int]()
+        self._find_symbol_deadline_ms = 0
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
         self._find_symbol_hit_line = 0
@@ -11367,6 +11378,7 @@ struct Desktop(Movable):
             if len(self._inlineval_pending_exprs) > 0:
                 self._inlineval_pending_exprs = List[String]()
                 self._inlineval_pending_rows = List[Int]()
+        self._expire_find_symbol_lsps(screen)
         self._refresh_lsp_status()
 
     def _on_install_complete(
@@ -15658,6 +15670,10 @@ struct Desktop(Movable):
         for li in range(len(self.lsp_managers)):
             if not self.lsp_managers[li].is_ready():
                 continue
+            # One that has stopped answering won't answer this either;
+            # don't make every lookup sit out the deadline for it.
+            if self.lsp_managers[li].is_unresponsive():
+                continue
             if self.lsp_managers[li].request_workspace_symbols(name):
                 pending.append(li)
         if len(pending) == 0:
@@ -15679,6 +15695,8 @@ struct Desktop(Movable):
             )
             return
         self._find_symbol_pending_lsps = pending^
+        self._find_symbol_deadline_ms = \
+            monotonic_ms() + _FIND_SYMBOL_LSP_TIMEOUT_MS
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_qualifier = qualifier
         # An empty hit path is how the resolver is told there is no
@@ -15690,6 +15708,46 @@ struct Desktop(Movable):
         self.find_symbol.set_pending(
             String("Resolving ") + name + String(" via LSP…"),
         )
+
+    def _expire_find_symbol_lsps(mut self, screen: Rect):
+        """Stop waiting on language servers that won't answer a submitted
+        Find Symbol: one that failed or was retired since it was asked,
+        and — past the deadline — any that is simply silent. The lookup
+        then settles with what the others returned, which falls back to
+        the verified text match when that is nothing.
+
+        Without it one server that never replies (alive, READY, reading
+        nothing) left the picker on "Resolving … via LSP…" until Esc:
+        ``submit`` ignores Enter while a lookup is pending."""
+        if not self.find_symbol.active or self.find_symbol.is_choosing() \
+                or len(self._find_symbol_pending_lsps) == 0:
+            return
+        var silent = String("")
+        var timed_out = monotonic_ms() >= self._find_symbol_deadline_ms
+        var k = 0
+        while k < len(self._find_symbol_pending_lsps):
+            var li = self._find_symbol_pending_lsps[k]
+            var gone = li < 0 or li >= len(self.lsp_managers) \
+                or not self.lsp_managers[li].is_ready()
+            if not gone and not timed_out:
+                k += 1
+                continue
+            if not gone:
+                if len(silent.as_bytes()) > 0:
+                    silent = silent + String(", ")
+                silent = silent + self.lsp_managers[li].language_id()
+            _ = self._find_symbol_pending_lsps.pop(k)
+        if len(self._find_symbol_pending_lsps) > 0:
+            return
+        var all_items = self._find_symbol_collected^
+        self._find_symbol_collected = List[WorkspaceSymbolItem]()
+        self._resolve_find_symbol_workspace(all_items^, screen)
+        if len(silent.as_bytes()) > 0:
+            # After the jump, so this is what the bar ends up saying.
+            self._say_error(
+                String("Find Symbol: LSP[") + silent
+                + String("] didn't answer — used the text match"),
+            )
 
     def _resolve_find_symbol_workspace(
         mut self,
@@ -18937,6 +18995,7 @@ def _lsp_status_key(m: LspManager, inflight_ms: Int) -> UInt64:
     h = fnv_str(h, m.inflight_word())
     h = fnv_int(h, inflight_ms // 100 if inflight_ms >= 200 else -1)
     h = fnv_int(h, 1 if m.last_empty() else 0)
+    h = fnv_int(h, m.unresponsive_secs())
     return h
 
 
@@ -18983,6 +19042,23 @@ def _refresh_status_for(
         )
         return
     if m.is_ready():
+        # Before the waiting states below: each of them is this, seen
+        # from one request.
+        var silent_secs = m.unresponsive_secs()
+        if silent_secs >= 0:
+            sb.set_message(
+                prefix + String("not responding (") + String(silent_secs)
+                    + String("s)"),
+                status_error_attr(),
+                clickable=True,
+                tooltip=String(
+                    "The language server has sent nothing since a "
+                    "request went out. It may be busy, or stuck: "
+                    "right-click to restart it."
+                ),
+                owner=String("lsp"),
+            )
+            return
         var word = m.inflight_word()
         if len(word.as_bytes()) > 0:
             sb.set_message(

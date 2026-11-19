@@ -1,0 +1,16 @@
+{
+  "_comment": "A server advertising workspaceSymbolProvider that accepts workspace/symbol and never answers it (ty deadlocked this way: alive, READY, reading nothing). Find Symbol must settle on the verified text match after its deadline rather than sit on 'Resolving ... via LSP...' forever, and the manager must report the silence.",
+  "position_encoding": "utf-8",
+  "capabilities": {
+    "workspaceSymbolProvider": true,
+    "hoverProvider": true
+  },
+  "responses": {
+    "workspace/symbol": {
+      "$no_reply": true
+    },
+    "textDocument/hover": {
+      "contents": "hi"
+    }
+  }
+}

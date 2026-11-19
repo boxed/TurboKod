@@ -42,7 +42,10 @@ from turbokod.lsp_position import (
 )
 from turbokod.posix import getcwd_path, monotonic_ms, sleep_ms, which
 
-from support import _process_dir_name, _SCREEN, _sweep_process_dirs, setup_test_env
+from support import (
+    _ensure_dir, _process_dir_name, _rm_rf, _SCREEN, _sweep_process_dirs,
+    _temp_path, setup_test_env,
+)
 
 
 # ── harness ──────────────────────────────────────────────────────────────
@@ -1293,6 +1296,181 @@ def test_code_action_resolve_that_never_answers_still_settles() raises:
     assert_equal(len(actions[1].file_edits), 1)
     assert_true(m.is_ready())
     m.shutdown()
+
+
+def _symbol_project(name: String, source: String) raises -> String:
+    """A scratch project holding one ``mod.py``. Under the test home, not
+    ``_scratch_dir``: that is inside the checkout's gitignored ``.build``,
+    which the identifier index's file walk leaves out."""
+    var dir = _temp_path(name)
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    assert_true(write_file(dir + String("/mod.py"), source))
+    return dir^
+
+
+def test_find_symbol_settles_when_a_server_never_answers() raises:
+    """A submitted Find Symbol must not wait forever on ``workspace/symbol``.
+
+    The server here takes the request and never replies — what ty did when
+    its scheduler deadlocked: process alive, pipes open, state READY. The
+    picker ignores Enter while a lookup is pending, so before the deadline
+    existed it sat on "Resolving … via LSP…" until Esc. Now it settles on
+    the verified text match and says which server stayed silent."""
+    var dir = _symbol_project(String("_ws_symbol_hangs"), String(
+        "import os\n"
+        "def hanging_symbol(a, b):\n"
+        "    return a + b\n"
+    ))
+    var m = LspManager()
+    if not _start_mock(m, String("workspace_symbol_hangs.json"), dir, String("")):
+        return
+    var d = Desktop()
+    d.project = Optional[String](dir)
+    d.lsp_managers.append(m^)
+    d._open_find_symbol()
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    assert_true(d.symbol_index.is_ready())
+    d.find_symbol.query.set_text(String("hanging"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    assert_equal(d.find_symbol.entries[0].name, String("hanging_symbol"))
+
+    _ = d.picker_activate(0, 0, _SCREEN)
+    assert_equal(len(d._find_symbol_pending_lsps), 1)
+    # Waiting is right while the deadline hasn't passed.
+    for _ in range(10):
+        d.lsp_tick(_SCREEN)
+        sleep_ms(5)
+    assert_true(d.find_symbol.active)
+    assert_equal(len(d._find_symbol_pending_lsps), 1)
+
+    # Past it (``_FIND_SYMBOL_LSP_TIMEOUT_MS``, brought forward so the
+    # test doesn't sleep through it), the lookup settles.
+    d._find_symbol_deadline_ms = monotonic_ms()
+    d.lsp_tick(_SCREEN)
+    assert_false(d.find_symbol.active)
+    assert_equal(len(d._find_symbol_pending_lsps), 0)
+    var idx = d._focused_editor_idx()
+    assert_true(idx >= 0)
+    assert_true(d.windows.windows[idx].editor.file_path.endswith("/mod.py"))
+    assert_equal(d.windows.windows[idx].editor.selections[0].row, 1)
+    assert_equal(d.status_bar.message, String(
+        "Find Symbol: LSP[python] didn't answer — used the text match",
+    ))
+    d.shutdown()
+    _rm_rf(dir)
+
+
+def test_find_symbol_stops_waiting_on_a_server_that_failed() raises:
+    """A server that dies (or is retired) after being asked will never
+    answer; the lookup settles without sitting out the deadline."""
+    var dir = _symbol_project(String("_ws_symbol_failed"), String(
+        "def failing_symbol():\n"
+        "    return 1\n"
+    ))
+    var m = LspManager()
+    if not _start_mock(m, String("workspace_symbol_hangs.json"), dir, String("")):
+        return
+    var d = Desktop()
+    d.project = Optional[String](dir)
+    d.lsp_managers.append(m^)
+    d._open_find_symbol()
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    d.find_symbol.query.set_text(String("failing"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    _ = d.picker_activate(0, 0, _SCREEN)
+    assert_equal(len(d._find_symbol_pending_lsps), 1)
+
+    d.lsp_managers[0].state = d.lsp_managers[0].state + 1   # READY -> FAILED
+    assert_true(d.lsp_managers[0].is_failed())
+    d.lsp_tick(_SCREEN)
+    assert_false(d.find_symbol.active)
+    var idx = d._focused_editor_idx()
+    assert_true(idx >= 0)
+    assert_true(d.windows.windows[idx].editor.file_path.endswith("/mod.py"))
+    d.shutdown()
+    _rm_rf(dir)
+
+
+def test_a_silent_server_is_reported_as_not_responding() raises:
+    """``unresponsive_secs`` tells a server that has stopped answering from
+    one that is merely idle or slow, and Find Symbol stops asking it.
+
+    Silence is what counts: a request outstanding with nothing at all
+    received since it went out. The clock is wound back rather than slept
+    through (``_UNRESPONSIVE_MS`` is ten seconds)."""
+    var text = String("def quiet_symbol():\n    return 1\n")
+    var dir = _symbol_project(String("_unresponsive"), text)
+    var path = dir + String("/mod.py")
+    var m = LspManager()
+    if not _start_mock(m, String("workspace_symbol_hangs.json"), dir, String("")):
+        return
+    # Idle, nothing asked: not unresponsive however long it stays quiet.
+    m._last_rx_ms -= 60_000
+    assert_equal(m.unresponsive_secs(), -1)
+
+    assert_true(m.request_workspace_symbols(String("quiet")))
+    _pump(m, 10)
+    assert_false(m.has_pending_workspace_symbols())
+    # Asked a moment ago: still just waiting.
+    assert_equal(m.unresponsive_secs(), -1)
+    # A superseded request is cancelled, and no longer owed an answer.
+    assert_true(m.request_workspace_symbols(String("quiet")))
+    assert_equal(len(m._awaited), 1)
+
+    # Twelve seconds of nothing since it went out.
+    m._last_rx_ms -= 12_000
+    m._awaited[0].sent_ms -= 12_000
+    assert_true(m.unresponsive_secs() >= 12)
+    assert_true(m.is_unresponsive())
+    assert_true(m.is_ready())
+
+    # Find Symbol doesn't ask it: straight to the text match.
+    var d = Desktop()
+    d.project = Optional[String](dir)
+    d.lsp_managers.append(m^)
+    d._open_find_symbol()
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    d.find_symbol.query.set_text(String("quiet"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    _ = d.picker_activate(0, 0, _SCREEN)
+    assert_false(d.find_symbol.active)
+    assert_equal(len(d._find_symbol_pending_lsps), 0)
+    # ...and the status bar says so instead of "ready".
+    d.lsp_tick(_SCREEN)
+    assert_true(
+        d.status_bar.message.startswith("LSP[python]: not responding ("),
+        d.status_bar.message,
+    )
+
+    # Anything from the server ends it, though workspace/symbol is still
+    # unanswered: a request a server never answers is not silence.
+    assert_true(d.lsp_managers[0].request_hover(path, 0, 4, text))
+    for _ in range(100):
+        d.lsp_tick(_SCREEN)
+        if not d.lsp_managers[0].is_unresponsive():
+            break
+        sleep_ms(10)
+    assert_false(d.lsp_managers[0].is_unresponsive())
+    d.lsp_tick(_SCREEN)
+    assert_false(
+        d.status_bar.message.startswith("LSP[python]: not responding"),
+        d.status_bar.message,
+    )
+    d.shutdown()
+    _rm_rf(dir)
 
 
 def _sent_ids(msgs: List[JsonValue], method: String) -> List[String]:
