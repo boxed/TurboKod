@@ -33,6 +33,13 @@ void    tk_desktop_open_file_at(int64_t h, int64_t path_ptr, int64_t path_len,
                                 int64_t line, int64_t character,
                                 int64_t cols, int64_t rows);
 void    tk_desktop_tick(int64_t h, int64_t cols, int64_t rows);
+// Pty output wake: the core calls `callback` (on a thread of its own) when a
+// terminal / test pane's child writes; one call per tk_pty_wake_ack, which
+// the host makes before it ticks. tk_desktop_pty_pending says which Desktop
+// has output waiting (a zero-timeout poll per pane).
+void    tk_pty_wake_install(void (*callback)(void));
+void    tk_pty_wake_ack(void);
+int32_t tk_desktop_pty_pending(int64_t h);
 int64_t tk_desktop_layout(int64_t h, int64_t cols, int64_t rows,
                           int64_t out_ptr, int64_t cap);
 // Native smooth-scroll (macOS host), working in *visual-row* coordinates so

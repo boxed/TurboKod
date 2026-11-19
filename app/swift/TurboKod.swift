@@ -2911,6 +2911,73 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// for hover, half the repaint cost. A frame that genuinely changes
     /// still resets `idleTicks` to 0 (full rate) via the timer body below.
     func noteActivity() { if idleTicks > 30 { idleTicks = 30 } }
+
+    // Pty output wake. The redraw timer alone showed a child's output on its
+    // next tick — up to 50 ms late at full rate, 250 ms from idle — which is
+    // what a full-screen program scrolled with the wheel (every step a round
+    // trip through the child) or an echoed keystroke waited out. The core
+    // now says when a pty turns readable and the owning window is ticked
+    // right then, at most once per `ptyFrame`; the timer still does
+    // everything else. A child that keeps writing faster than a tick drains
+    // (`cat` of a big file) is paced at the timer's own rate, as before:
+    // `ptyBehind` counts the ticks in a row that left output unread, and a
+    // redraw arriving in two pieces must not count as a flood.
+    private static let ptyFrame: CFTimeInterval = 1.0 / 60.0
+    private static let ptyFloodFrame: CFTimeInterval = 0.05
+    private static let ptyFloodTicks = 12
+    private var ptyPolledAt: CFTimeInterval = 0
+    private var ptyPollQueued = false
+    private var ptyBehind = 0
+
+    /// A pty has output (main queue, from the wake callback), or the last
+    /// tick left some behind.
+    func ptyWake() {
+        if ptyPollQueued { return }
+        let frame = ptyBehind >= Self.ptyFloodTicks ? Self.ptyFloodFrame : Self.ptyFrame
+        let wait = ptyPolledAt + frame - CACurrentMediaTime()
+        if wait <= 0 { ptyPoll(); return }
+        ptyPollQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            self?.ptyPollQueued = false
+            self?.ptyPoll()
+        }
+    }
+
+    private func ptyPoll() {
+        // Ack before draining, so output arriving mid-tick wakes us again.
+        tk_pty_wake_ack()
+        ptyPolledAt = CACurrentMediaTime()
+        var more = false
+        if !NSApp.isHidden {
+            for v in views where v.handle != 0 && tk_desktop_pty_pending(v.handle) != 0 {
+                let pair = panels[ObjectIdentifier(v)]
+                let shown = Self.paintable(v.window)
+                let panelShown = Self.paintable(pair?.window)
+                // A buried window's output waits for the timer's bare tick:
+                // nothing to show, and that cadence is the idle CPU budget.
+                if !shown && !panelShown { continue }
+                if shown {
+                    if v.pollFrame() { v.needsDisplay = true; idleTicks = 0 }
+                } else {
+                    v.tickOnly()
+                }
+                // Floating panels share the Desktop the main view just ticked.
+                if panelShown, let pv = pair?.view, pv.pollFrame() {
+                    pv.needsDisplay = true; idleTicks = 0
+                }
+                if tk_desktop_pty_pending(v.handle) != 0 { more = true }
+            }
+        }
+        ptyBehind = more ? ptyBehind + 1 : 0
+        // Edge-triggered: bytes a tick left behind raise no wake of their own.
+        if more { ptyWake() }
+    }
+
+    private static func paintable(_ w: NSWindow?) -> Bool {
+        guard let w else { return false }
+        return w.isVisible && w.occlusionState.contains(.visible)
+    }
+
     // Always-alive Mojo Desktop used to drive the menu bar when no window
     // is open. Without it, closing the last window (or starting with an
     // empty session) leaves NSApp.mainMenu pointing at items wired to
@@ -3002,6 +3069,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         chdirToResourceRoot()
         installCliHelperIfNeeded()
         buildMenu()
+        // Before any Desktop spawns a pty: only later ones are watched. The
+        // callback runs on the core's watcher thread, so it only hands off.
+        tk_pty_wake_install {
+            DispatchQueue.main.async { AppController.shared?.ptyWake() }
+        }
         // Initialize the chrome Desktop before any session restore so its
         // menu snapshot is ready to drive NSApp.mainMenu the moment we
         // have zero windows (empty session, or last window closed).

@@ -637,6 +637,10 @@ struct TerminalPane(Copyable, Movable):
 
     # --- per-tick drain ------------------------------------------------
 
+    def output_pending(self) -> Bool:
+        """The pty has bytes (or an EOF) ``tick`` hasn't read yet."""
+        return self.pty.output_pending()
+
     def tick(mut self):
         """Drain whatever's on the pty master right now and feed it
         into the emulator. Called by ``Desktop`` each frame so output

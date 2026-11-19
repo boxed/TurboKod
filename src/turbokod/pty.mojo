@@ -21,7 +21,8 @@ from std.ffi import external_call
 
 from .lsp import _build_argv_buffer
 from .posix import (
-    close_fd, kill_pid, reap_child, SIGTERM, untrack_child, waitpid_nohang,
+    close_fd, kill_pid, poll_stdin, reap_child, SIGTERM, untrack_child,
+    waitpid_nohang,
 )
 
 
@@ -124,6 +125,13 @@ struct PtyProcess(Copyable, Movable):
         proc.master_fd = master_ptr[unsafe_offset=0]
         proc.alive     = True
         return proc^
+
+    def output_pending(self) -> Bool:
+        """The master has bytes (or the child's EOF) to read right now.
+        Never once ``alive`` is off: a hung-up master polls readable for
+        as long as it stays open."""
+        return self.alive and self.master_fd >= 0 \
+            and poll_stdin(self.master_fd, 0)
 
     def set_winsize(self, cols: Int, rows: Int) -> Int:
         """Re-send window size to the kernel. The child gets a

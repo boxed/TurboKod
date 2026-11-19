@@ -376,6 +376,32 @@ def tk_desktop_open_file_at(
 
 
 @export
+def tk_pty_wake_install(callback: Int) abi("C"):
+    """Have the shim call ``callback`` (a ``void (*)(void)``, on a thread
+    of the shim's own) when a pty pane's child writes — so a host with a
+    run loop shows the output when it arrives rather than on its next
+    timer tick. One call per ``tk_pty_wake_ack``. Before the first
+    Desktop: only ptys spawned afterwards are watched."""
+    _ = external_call["tk_pty_set_wake", Int32](callback)
+
+
+@export
+def tk_pty_wake_ack() abi("C"):
+    """The host is about to tick: the next output wakes it again."""
+    _ = external_call["tk_pty_ack_wake", Int32]()
+
+
+@export
+def tk_desktop_pty_pending(h: Int) abi("C") -> Int32:
+    """1 while one of the Desktop's pty panes has output its next tick
+    would read (``Desktop.pty_output_pending``) — which window a pty wake
+    is for, and after a tick whether the child is outpacing it."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].pty_output_pending() else 0
+
+
+@export
 def tk_desktop_busy(h: Int) abi("C") -> Int32:
     """1 while the Desktop has frame-sliced work the user is waiting on
     (``Desktop.has_background_work``): a terminal host should then poll

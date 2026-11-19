@@ -267,6 +267,10 @@ struct TestPane(Copyable, Movable):
         self.vt.scroll_view_by(rows)
         self.sel.redrag(self.vt)
 
+    def output_pending(self) -> Bool:
+        """The pty has bytes ``tick`` hasn't read yet."""
+        return self.started and not self.exited and self.pty.output_pending()
+
     def tick(mut self):
         """Drain the pty into the emulator, flush its side-effects, and
         detect child exit. Called by ``Desktop`` each frame."""

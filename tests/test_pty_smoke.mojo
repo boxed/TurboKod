@@ -24,7 +24,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from turbokod.posix import (
     alloc_zero_buffer, getenv_value, poll_stdin, read_into, setenv_value,
-    waitpid_nohang,
+    sleep_ms, waitpid_nohang,
 )
 from turbokod.pty import PtyProcess
 from turbokod.terminal_pane import TerminalPane
@@ -206,6 +206,45 @@ def test_pty_isatty_detected_by_child() raises:
     assert_equal(vt.cell_at(0, 0).glyph, String("T"))
     assert_equal(vt.cell_at(0, 1).glyph, String("T"))
     assert_equal(vt.cell_at(0, 2).glyph, String("Y"))
+
+
+def test_pty_output_pending_tracks_what_is_unread() raises:
+    """``output_pending`` is what the native host asks to find the window
+    a pty wake is for, and again after ticking to learn whether the child
+    is outpacing it — so it has to go quiet once the bytes are read, and
+    stay quiet on a pty that is no longer ``alive`` (a hung-up master
+    polls readable for as long as it is open, which would have the host
+    re-ticking a dead pane forever)."""
+    var argv = List[String]()
+    argv.append(String("/bin/sh"))
+    argv.append(String("-c"))
+    argv.append(String("echo hi; sleep 30"))
+    var p = PtyProcess.spawn(argv)
+    var waited = 0
+    while not p.output_pending() and waited < 3000:
+        sleep_ms(5)
+        waited += 5
+    assert_true(p.output_pending())
+    var scratch = alloc_zero_buffer(4096)
+    assert_true(read_into(p.master_fd, scratch, 4096) > 0)
+    assert_true(not p.output_pending())
+    p.terminate()
+    assert_true(not p.output_pending())
+
+    var gone = List[String]()
+    gone.append(String("/bin/sh"))
+    gone.append(String("-c"))
+    gone.append(String("exit 0"))
+    var q = PtyProcess.spawn(gone)
+    # The EOF is something to read — until the pane has seen it.
+    waited = 0
+    while not q.output_pending() and waited < 3000:
+        sleep_ms(5)
+        waited += 5
+    assert_true(q.output_pending())
+    q.alive = False
+    assert_true(not q.output_pending())
+    q.terminate()
 
 
 def test_pty_terminate_reaps_the_child() raises:

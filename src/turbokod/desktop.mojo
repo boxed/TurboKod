@@ -12731,6 +12731,16 @@ struct Desktop(Movable):
         if self.dap.is_running() or self.dap.is_stopped():
             self.dap.client.process.trace(String("dap_tick done"))
 
+    def pty_output_pending(self) -> Bool:
+        """Whether a pty pane has output its next ``tick`` would drain.
+        The native host asks when the shim's pty wake fires (and again
+        after ticking), to find the window the output belongs to without
+        ticking them all. One zero-timeout ``poll`` a pane."""
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].output_pending():
+                return True
+        return self.test_pane.output_pending()
+
     def terminal_tick(mut self):
         """Drain every docked terminal's shell output and dispatch any
         pending chrome-command click. Called once per frame by the

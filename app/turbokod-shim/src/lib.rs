@@ -370,10 +370,124 @@ pub unsafe extern "C" fn tk_pty_spawn(
     libc::pthread_sigmask(libc::SIG_SETMASK, &old_mask, std::ptr::null_mut());
     libc::close(slave);
     set_nonblock(master);
+    pty_wake::watch(master);
     tk_track_child_add(pid as c_int);
     *pid_out = pid as c_int;
     *master_fd_out = master;
     0
+}
+
+// --- PTY output wake ------------------------------------------------------
+//
+// A host with a run loop of its own (the macOS app) polls the core on a
+// timer, so a child's output used to sit in the pty until the next tick:
+// up to 50 ms at full rate, 250 ms once the app had gone idle. That is
+// what made a full-screen program lag behind the wheel — every scroll step
+// is a round trip through the child. The host registers a callback here
+// instead, and a thread parked in ``kevent`` calls it when any pty master
+// turns readable.
+//
+// Edge-triggered (``EV_CLEAR``), so nothing has to be re-armed after a
+// read and closing the fd is all it takes to stop watching it. One call
+// per acknowledged wake: the host's ``tk_pty_wake_ack`` (made *before* it
+// drains) lets the next one through. Without a callback — the terminal
+// frontends, the tests — nothing is watched and no thread exists.
+
+#[cfg(target_os = "macos")]
+mod pty_wake {
+    use std::ffi::c_int;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+
+    static KQ: AtomicI32 = AtomicI32::new(-1);
+    static CALLBACK: AtomicUsize = AtomicUsize::new(0);
+    static PENDING: AtomicBool = AtomicBool::new(false);
+
+    pub fn watch(fd: c_int) {
+        let kq = KQ.load(Ordering::Acquire);
+        if kq < 0 || fd < 0 {
+            return;
+        }
+        unsafe {
+            let mut ev: libc::kevent = std::mem::zeroed();
+            ev.ident = fd as libc::uintptr_t;
+            ev.filter = libc::EVFILT_READ;
+            ev.flags = libc::EV_ADD | libc::EV_CLEAR;
+            libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+        }
+    }
+
+    pub fn set(cb: usize) {
+        CALLBACK.store(cb, Ordering::Release);
+        if cb == 0 || KQ.load(Ordering::Acquire) >= 0 {
+            return;
+        }
+        let kq = unsafe { libc::kqueue() };
+        if kq < 0 {
+            return;
+        }
+        KQ.store(kq, Ordering::Release);
+        let spawned = std::thread::Builder::new()
+            .name("tk-pty-wake".into())
+            .spawn(move || run(kq));
+        if spawned.is_err() {
+            KQ.store(-1, Ordering::Release);
+            unsafe { libc::close(kq) };
+        }
+    }
+
+    pub fn ack() {
+        PENDING.store(false, Ordering::Release);
+    }
+
+    fn run(kq: c_int) {
+        unsafe {
+            // Signals are the main thread's business (the quit handlers).
+            let mut all: libc::sigset_t = std::mem::zeroed();
+            libc::sigfillset(&mut all);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+            let mut evs: [libc::kevent; 16] = std::mem::zeroed();
+            loop {
+                let n = libc::kevent(
+                    kq, std::ptr::null(), 0, evs.as_mut_ptr(), 16, std::ptr::null(),
+                );
+                if n < 0 {
+                    if *super::errno_location() == libc::EINTR {
+                        continue;
+                    }
+                    return;
+                }
+                if n == 0 || PENDING.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                let cb = CALLBACK.load(Ordering::Acquire);
+                if cb != 0 {
+                    let f: extern "C" fn() = std::mem::transmute(cb);
+                    f();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod pty_wake {
+    pub fn watch(_fd: std::ffi::c_int) {}
+    pub fn set(_cb: usize) {}
+    pub fn ack() {}
+}
+
+/// Call ``cb`` (from a thread of the shim's own — it must only hand off
+/// to the host's loop) when a pty spawned from now on has output to read.
+/// 0 stops the calls.
+#[no_mangle]
+pub extern "C" fn tk_pty_set_wake(cb: usize) {
+    pty_wake::set(cb);
+}
+
+/// The host is about to drain: let the next wake through.
+#[no_mangle]
+pub extern "C" fn tk_pty_ack_wake() {
+    pty_wake::ack();
 }
 
 /// Signal-number bound (`NSIG` in `signal.h`); libc 0.2 doesn't export it.

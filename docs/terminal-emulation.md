@@ -58,6 +58,57 @@ glue also translates *our* input vocabulary (`KEY_*`, `MOD_*`,
 section) into Ghostty's, so no Ghostty enum value appears in Mojo.
 `tests/test_vt.mojo` pins the encodings, so a drift fails a test.
 
+## Output wakes the native host
+
+The native app polls the core on a 20 Hz timer that backs off to 4 Hz
+when nothing changes, and a pty is only read inside a tick. So a child's
+output used to wait for the next one: up to 50 ms at full rate, 250 ms
+from idle. An echoed keystroke paid that once; a full-screen program
+scrolled with the wheel (Claude Code's fullscreen mode, `less`, vim) paid
+it on every step, because each wheel event is a round trip through the
+child — 20 frames a second at best, each late.
+
+Now the pty says when it has something:
+
+- The shim keeps a `kqueue` and a thread parked in `kevent`
+  (`pty_wake` in `lib.rs`). `tk_pty_spawn` adds each master,
+  edge-triggered (`EV_CLEAR`), so nothing is re-armed after a read and
+  closing the fd is all it takes to stop watching it. Only once a host
+  has installed a callback (`tk_pty_wake_install`): the terminal
+  frontends and the tests get no thread and no kqueue.
+- The callback (on the shim's thread) hops to the main queue,
+  `AppController.ptyWake`. That ticks + lays out the windows whose
+  Desktop reports `tk_desktop_pty_pending` — a zero-timeout `poll` per
+  pane (`PtyProcess.output_pending`), so one window's output doesn't
+  tick the others — at most once per 1/60 s.
+- One callback per `tk_pty_wake_ack`, which the host makes *before* it
+  ticks: output arriving mid-tick raises the next wake, output arriving
+  before the ack is read by that tick.
+
+The timer still does everything else, and is the backstop. Two cases
+stay on its cadence on purpose:
+
+- **A buried or hidden window.** Nothing to show, and that cadence is the
+  idle-CPU budget; its bare tick still drains the pty for attention
+  events.
+- **A flood.** A tick reads at most 64 KB, and an edge-triggered wake
+  doesn't repeat for bytes left behind, so the host re-polls itself while
+  `tk_desktop_pty_pending` stays set after a tick. Twelve such ticks in a
+  row (`ptyFloodTicks`, ~200 ms of the child outpacing us) drop the pace
+  to the timer's 50 ms until a tick comes up empty — `cat big.log` costs
+  what it did, not three times as many frames. A streak, not a single
+  left-behind read: a redraw that arrives in two pieces is not a flood.
+
+`tk_desktop_pty_pending` must only be true for output a tick will
+actually read. A pane that stops ticking its pty while the master stays
+open (a master past EOF polls readable forever) would have the host
+re-polling at the flood pace for good; `output_pending` is gated on
+`PtyProcess.alive` for that reason
+(`test_pty_output_pending_tracks_what_is_unread`).
+
+The terminal frontends (`run.sh`, `tk-tui`) still wait on stdin alone
+with a 50 ms timeout, so they have the old latency.
+
 ## Building
 
 `scripts/build_ghostty.sh` clones Ghostty at `GHOSTTY_COMMIT` into
