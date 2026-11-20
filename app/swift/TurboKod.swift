@@ -9195,6 +9195,8 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
                                           target: nil, action: nil)
     private let table = GitTable()
     private var labels: [String] = []
+    /// Per row: false for a commit that isn't on a remote yet.
+    private var pushed: [Bool] = []
     private var dismissed = false
 
     init(view: CellView) {
@@ -9220,8 +9222,6 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
             case "enter": self?.reviewClicked(); return true
             case "esc": self?.cancelClicked(); return true
             default: return false
-    /// Per row: false for a commit that isn't on a remote yet.
-    private var pushed: [Bool] = []
             }
         }
         let scroll = NSScrollView()
@@ -9279,6 +9279,8 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
         let text = labels[i]
         // "sha  subject" / "name  subject": the key in monospace, the rest plain.
+        // A commit that isn't on a remote yet is marked like in the git view:
+        // "↑sha" in red, with a column kept for the arrow on every row.
         let parts = text.components(separatedBy: "  ")
         let local = i < pushed.count && !pushed[i]
         let lead = local ? "↑" : pushed.contains(false) ? " " : ""
@@ -9308,8 +9310,6 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
     @objc private func tabChanged() {
         table.deselectAll(nil)
         act(0, tabs.selectedSegment)
-        // A commit that isn't on a remote yet is marked like in the git view:
-        // "↑sha" in red, with a column kept for the arrow on every row.
     }
 
     @objc private func reviewClicked() {
