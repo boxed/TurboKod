@@ -51,10 +51,21 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
   changes, like `pollPlatinumChrome` (each waits for the other's frame to come
   off first). Installing snaps the window to whole cells, top-left fixed.
 - `TVMainFrame` holds two `CellView`s on the same Desktop: `chrome`, a
-  `.frame` surface that only draws the ring (its clicks go to
-  `onFrameMouse`), and the window's own grid, one cell in at the sides and
-  below the title row, down to the bottom edge. Everything the grid does
-  stays in its own coordinates, so nothing else needed to change.
+  `.frame` surface that only lays out the ring, and the window's own grid,
+  one cell in at the sides and below the title row, down to the bottom
+  edge. Everything the grid does stays in its own coordinates, so nothing
+  else needed to change.
+- `chrome` is hidden. A view is backed by pixels for all of its bounds, so
+  a ring the size of the window cost as much as the grid inside it (26 MB
+  full screen at 2x) to show a title row and two columns. Three
+  `TVRingStrip`s over those parts draw it instead (`chrome.draw` in a
+  strip's context, the strip's bounds starting where its frame does so the
+  ring's coordinates hold) and take the clicks; `CellView.standIns` passes
+  a repaint of `chrome` on to them. A strip has a layer of its own and
+  clips to its bounds by hand: without the first the strips share one
+  layer the size of the window, and without the second each is backed for
+  everything `chrome` draws, the whole ring (and paints over the proxy
+  icon).
 - The ring is the window chrome:
   - title row: drag moves the window; double-click follows the system's
     "double-click a window's title bar" setting;

@@ -64,6 +64,54 @@ Live bytes for one open 913 KB, 19k-line source file (`desktop.mojo`):
 | HEAD copy for the git gutter | 1.9 MB | 0.4 MB |
 | LSP text snapshot | 0.9 MB | 0.9 MB |
 
+## The window's pixels
+
+The largest thing in the app's footprint was never the heap: it is the
+pixels behind each view (`IOSurface` in `footprint`, "CA Whippet Drawable"
+in `vmmap`, which also gives each one's size and format). A full-screen
+Turbo Vision window on a 3456-wide display, idle with a terminal pane open,
+was 214 MB, of which 130 MB was three buffers the size of the window. While
+the window is redrawing the system keeps two or three of each (541 MB
+measured), so a buffer's size counts several times over.
+
+- **4 bytes a pixel, not 8.** A window takes its screen's color space, and
+  on a wide-gamut screen the system backs its views with 16-bit float
+  components (`RGhA`). `NSWindow.useCompactBackingStores` sets the window's
+  color space to sRGB, which is what every color the app draws is in
+  anyway, and the buffers come out 8-bit (`BGRA`). `CellView` calls it when
+  it lands in a window. `depthLimit` and `CALayer.contentsFormat` do
+  nothing here.
+- **A view is backed for everything drawn in it, not for its bounds**, and
+  views without a layer of their own share one as large as all of them
+  together. So a view that draws little can still cost a window: the
+  Turbo Vision ring was a second full-window buffer for a title row and
+  two columns (now three `TVRingStrip`s, see [tv-frame.md](tv-frame.md)).
+- **A solid color is a layer, not a drawing.** `RetroShadowView` sets the
+  background color of two layers; filling the same two strips in `draw`
+  backed the shadow's whole window.
+
+While a window redraws, the footprint is well above this, and that part
+is the system's: its GPU rasterizer keeps a pool of textures in the
+process (`IOAccelerator (graphics)`, about 125 MB whatever the window's
+size) and two or three copies of each buffer, then marks them reclaimable
+a few idle seconds later. Switching between two full-screen project
+windows takes the app from 155 MB to 330 for that while. A plain `CALayer` from
+`makeBackingLayer` draws the same `draw(_:)` on the CPU with no pool
+(tried, 0.8 ms for a 123x40 grid of code), but that is drawing moved onto
+the main thread to shrink a cache the system gives back by itself, so the
+grid keeps the standard layer.
+
+Measure any of this with the screen on and unlocked. A window nobody can
+see is drawn another way: the pool never appears, and a test that showed
+180 MB shows 40.
+
+To see which view owns a buffer, walk the layers from the window's frame
+view and print each one's delegate, frame and `contents`: a drawn view has
+a `ContentLayer` child whose frame is the buffer's extent.
+
+Not done: the Mac OS 9 look's `PlatinumMainFrame` draws its frame in one
+window-sized view, so it still has a second buffer.
+
 ## The structures
 
 - **Spelling dictionary — `WordSet` (`word_set.mojo`).** One byte blob of

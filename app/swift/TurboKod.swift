@@ -610,8 +610,8 @@ enum UIFlag {
 // main view's Desktop handle and never ticks; it renders via the `_settings`
 // C ABI and is opened/closed by polling tk_desktop_settings_active.
 /// `.frame` is the Turbo Vision look's project frame (`TVMainFrame`): the
-/// ring of cells around a window's grid. It only draws; its clicks go to
-/// `onFrameMouse`.
+/// ring of cells around a window's grid. It only draws, and through
+/// `TVRingStrip`s, which take its clicks.
 /// `.dialog` is the Turbo Vision look's dialog window (`TVDialogWindow`): a
 /// declarative dialog, frame and all, in a window of its own.
 /// `.git` is the Turbo Vision look's git window (`TVDialogWindow` too).
@@ -666,8 +666,6 @@ final class CellView: NSView {
     // window. nil for `.main` views.
     weak var mainPeer: CellView?
     var project: String?      // set when a project is opened; drives session save
-    /// A `.frame` view's clicks: the window chrome's business, not the core's.
-    var onFrameMouse: ((NSEvent) -> Void)?
     /// A press the window chrome takes before the core sees it (true: taken).
     var onChromeMouse: ((NSEvent) -> Bool)?
     private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
@@ -1032,6 +1030,20 @@ final class CellView: NSView {
 
     /// Refetch the frame from the core and repaint.
     func redraw() { invalidateFrame(); needsDisplay = true }
+
+    /// Views that draw parts of this grid in its place (`TVRingStrip`),
+    /// when the view itself is hidden: they repaint when it is asked to.
+    var standIns: [NSView] = []
+    override var needsDisplay: Bool {
+        didSet { if needsDisplay { for v in standIns { v.needsDisplay = true } } }
+    }
+    override func setNeedsDisplay(_ rect: NSRect) {
+        super.setNeedsDisplay(rect)
+        for v in standIns {
+            let r = rect.intersection(v.bounds)
+            if !r.isEmpty { v.setNeedsDisplay(r) }
+        }
+    }
 
     /// Resolve a cell's foreground/background to 24-bit ``0xRRGGBB``, honoring
     /// the ``color_mode`` truecolor bits (real RGB from the per-cell fg_rgb /
@@ -2124,7 +2136,6 @@ final class CellView: NSView {
     }
 
     override func mouseDown(with e: NSEvent) {
-        if let f = onFrameMouse { f(e); return }
         if let f = onChromeMouse, f(e) { return }
         sendMouse(e, button: 1, pressed: 1, motion: 0)
     }
@@ -2371,6 +2382,7 @@ final class CellView: NSView {
     // host just routes by its answer. Settings windows don't accept drops.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        window?.useCompactBackingStores()
         if window != nil && (surface == .main || surface == .panels) {
             registerForDraggedTypes([.fileURL])
         }
@@ -6592,6 +6604,19 @@ enum ListColumns {
 
 
 extension NSWindow {
+    /// Give the window's views 4-byte pixels rather than 8.
+    ///
+    /// A window takes its screen's color space, and on a wide-gamut screen
+    /// (every recent MacBook's) the system then backs each view with 16-bit
+    /// float components: 53 MB for a full-screen grid at 2x where 8-bit
+    /// ones are 26. The window's color space is the only thing that decides
+    /// it; `depthLimit` and the layer's `contentsFormat` change nothing.
+    /// Every color the app draws is sRGB (the theme palette, `cgcolor`), so
+    /// this loses none.
+    func useCompactBackingStores() {
+        if colorSpace != .sRGB { colorSpace = .sRGB }
+    }
+
     /// A project window's grid: its content view, or inside the Mac OS 9
     /// look's frame.
     var cellView: CellView? {
@@ -13596,7 +13621,12 @@ func removeLookFrame(_ win: NSWindow, _ frame: LookFrame, cell: NSView, at f: NS
 /// ⌘-click it or the title for the path menu.
 final class TVMainFrame: NSView, NSDraggingSource {
     let cell: CellView
+    /// The ring's grid, as large as the window. Hidden: only the title row
+    /// and the two side columns of it show, and a view is backed by pixels
+    /// for all of its bounds (26 MB for a full-screen one at 2x), so
+    /// `strips` draw those parts of it instead.
     let chrome = CellView()
+    private let strips = [TVRingStrip(), TVRingStrip(), TVRingStrip()]
     var retroShadow: RetroShadow?
     private let icon = TVProxyIcon()
     private var info: [String: Any] = [:]
@@ -13607,9 +13637,15 @@ final class TVMainFrame: NSView, NSDraggingSource {
         super.init(frame: .zero)
         chrome.surface = .frame
         chrome.handle = cell.handle
-        chrome.onFrameMouse = { [weak self] e in self?.frameMouse(e) }
+        chrome.isHidden = true
+        chrome.standIns = strips
         icon.imageScaling = .scaleProportionallyDown
         addSubview(chrome)
+        for s in strips {
+            s.grid = chrome
+            s.onMouse = { [weak self] e in self?.frameMouse(e) }
+            addSubview(s)
+        }
         addSubview(cell)
         addSubview(icon)
     }
@@ -13637,6 +13673,11 @@ final class TVMainFrame: NSView, NSDraggingSource {
         }
         let inner = NSRect(x: CELL_W, y: CELL_H, width: (c - 2) * CELL_W, height: (r - 1) * CELL_H)
         if cell.frame != inner { cell.frame = inner }
+        // The ring around the grid: the title row and the two side columns.
+        let side = (r - 1) * CELL_H
+        strips[0].show(NSRect(x: 0, y: 0, width: ring.width, height: CELL_H))
+        strips[1].show(NSRect(x: 0, y: CELL_H, width: CELL_W, height: side))
+        strips[2].show(NSRect(x: (c - 1) * CELL_W, y: CELL_H, width: CELL_W, height: side))
         placeIcon()
     }
 
@@ -14239,6 +14280,7 @@ final class RetroShadow {
         win.hasShadow = false
         win.ignoresMouseEvents = true
         let view = RetroShadowView()
+        view.wantsLayer = true
         view.offset = offset
         view.color = color
         win.contentView = view
@@ -14297,18 +14339,85 @@ final class RetroShadow {
     }
 }
 
+/// The L that shows past the owner, as two colored layers: nothing is
+/// drawn, so the window (as large as its owner) has no backing store. A
+/// view that fills the two strips itself costs the whole rectangle in
+/// pixels, 26 MB under a full-screen window at 2x.
 private final class RetroShadowView: NSView {
     var offset: () -> NSSize = { .zero }
     var color = NSColor.black
+    private let below = CALayer(), beside = CALayer()
 
+    override var wantsUpdateLayer: Bool { true }
+
+    /// The two strips, which don't overlap, so nothing doubles up where
+    /// they meet.
+    private var strips: (below: NSRect, beside: NSRect) {
+        let b = bounds, d = offset()
+        return (NSRect(x: 0, y: 0, width: b.width, height: d.height),
+                NSRect(x: b.width - d.width, y: d.height, width: d.width, height: b.height - d.height))
+    }
+
+    override func updateLayer() {
+        guard let l = layer else { return }
+        if below.superlayer == nil { l.addSublayer(below); l.addSublayer(beside) }
+        // Not animated: the shadow moves with its owner.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        below.backgroundColor = color.cgColor
+        beside.backgroundColor = color.cgColor
+        (below.frame, beside.frame) = strips
+        CATransaction.commit()
+    }
+
+    /// For `captureWindowPNG`, which draws the shadow into its own image;
+    /// on screen the view updates its layers and this is never called.
     override func draw(_ dirtyRect: NSRect) {
         color.setFill()
-        let b = bounds, d = offset()
-        // Only the L that shows past the owner, so nothing doubles up
-        // where the two strips meet.
-        NSRect(x: 0, y: 0, width: b.width, height: d.height).fill()
-        NSRect(x: b.width - d.width, y: d.height, width: d.width, height: b.height - d.height).fill()
+        strips.below.fill()
+        strips.beside.fill()
     }
+}
+
+/// One part of the Turbo Vision ring: it draws `grid`'s cells under its
+/// own rectangle, in `grid`'s coordinates (its bounds start where its frame
+/// does), and hands its clicks to the frame.
+final class TVRingStrip: NSView {
+    weak var grid: CellView?
+    var onMouse: ((NSEvent) -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    // A layer of its own: views without one are drawn into a layer they
+    // share, as large as all of them together, which is the whole window.
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// Cover `rect` of the ring (the frame view's coordinates, which are
+    /// the ring's).
+    func show(_ rect: NSRect) {
+        guard frame != rect || bounds.origin != rect.origin else { return }
+        frame = rect
+        setBoundsOrigin(rect.origin)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let grid = grid, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        // Clipped by hand: a view's pixels cover what was drawn, not its
+        // bounds, and the grid draws the whole ring.
+        ctx.saveGState()
+        ctx.clip(to: bounds)
+        grid.draw(dirtyRect)
+        ctx.restoreGState()
+    }
+    override func mouseDown(with e: NSEvent) { onMouse?(e) }
 }
 
 /// The proxy icon over its two cells of the frame's title row. Clicks go
