@@ -42,8 +42,10 @@ macOS frontends with no host-specific code.
 
 from .canvas import Canvas, paint_drop_shadow
 from .cell import Cell
-from .colors import Attr, BLACK, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE
-from .list_box import ListBox
+from .colors import (
+    Attr, BLACK, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_RED, RED, WHITE,
+)
+from .list_box import ListBox, list_row_attr
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB, KEY_ENTER, KEY_ESC, KEY_LEFT,
     KEY_RIGHT, KEY_PAGEDOWN, KEY_PAGEUP, MOD_CTRL, MOD_META, MOD_SHIFT,
@@ -64,6 +66,7 @@ from .git_changes import (
 )
 from .new_names import NewName, new_names_in
 from .painter import Painter
+from .scrollbar import ScrollBarArea
 from .string_utils import display_columns, split_lines_no_trailing
 
 
@@ -151,18 +154,22 @@ struct ReviewMode(Movable):
     var mode: Int
     var root: String
 
-    # Picker state. Two tabs (Commits, Branches), each three parallel
-    # lists: option label, source kind, and ref — a commit SHA, a branch
-    # name, or empty for the unstaged / staged rows. ``picker_*`` is the
-    # *shown* tab's lists; ``_tab_*`` hold both, indexed by tab.
+    # Picker state. Two tabs (Commits, Branches), each four parallel
+    # lists: option label, source kind, ref — a commit SHA, a branch
+    # name, or empty for the unstaged / staged rows — and whether a commit
+    # is on a remote (``GitCommit.is_pushed``; True for every other row).
+    # ``picker_*`` is the *shown* tab's lists; ``_tab_*`` hold both,
+    # indexed by tab.
     var picker_labels: List[String]
     var picker_kind: List[Int]
     var picker_sha: List[String]
+    var picker_pushed: List[Bool]
     var picker_list: ListBox
     var picker_tab: Int
     var _tab_labels: List[List[String]]
     var _tab_kind: List[List[Int]]
     var _tab_sha: List[List[String]]
+    var _tab_pushed: List[List[Bool]]
     var _tab_cursor: List[Int]
     # The main line (``main`` / ``master``) branches are diffed against;
     # empty when the repo has neither.
@@ -248,11 +255,13 @@ struct ReviewMode(Movable):
         self.picker_labels = List[String]()
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
+        self.picker_pushed = List[Bool]()
         self.picker_list = ListBox()
         self.picker_tab = _TAB_COMMITS
         self._tab_labels = List[List[String]]()
         self._tab_kind = List[List[Int]]()
         self._tab_sha = List[List[String]]()
+        self._tab_pushed = List[List[Bool]]()
         self._tab_cursor = List[Int]()
         self.main_branch = String("")
         self.current_branch = String("")
@@ -319,9 +328,11 @@ struct ReviewMode(Movable):
         self.picker_labels = List[String]()
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
+        self.picker_pushed = List[Bool]()
         self._tab_labels = List[List[String]]()
         self._tab_kind = List[List[Int]]()
         self._tab_sha = List[List[String]]()
+        self._tab_pushed = List[List[Bool]]()
         self._tab_cursor = List[Int]()
         self.checkout_request = String("")
         self._reset_review()
@@ -383,6 +394,7 @@ struct ReviewMode(Movable):
         self.picker_labels = List[String]()
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
+        self.picker_pushed = List[Bool]()
         # Commits tab: unstaged / staged + recent commits.
         # Only offer the unstaged / staged entries when there's actually a
         # diff on that side — an empty ``git diff`` would just open a blank
@@ -392,29 +404,35 @@ struct ReviewMode(Movable):
             self.picker_labels.append(String("Unstaged changes"))
             self.picker_kind.append(_SRC_UNSTAGED)
             self.picker_sha.append(String(""))
+            self.picker_pushed.append(True)
         if len(compute_staged_diff(self.root).as_bytes()) > 0:
             self.picker_labels.append(String("Staged changes"))
             self.picker_kind.append(_SRC_STAGED)
             self.picker_sha.append(String(""))
+            self.picker_pushed.append(True)
         var commits = fetch_git_commits(self.root, _COMMIT_LIMIT)
         for i in range(len(commits)):
             var c = commits[i]
             self.picker_labels.append(c.short_sha + String("  ") + c.subject)
             self.picker_kind.append(_SRC_COMMIT)
             self.picker_sha.append(c.short_sha)
+            self.picker_pushed.append(c.is_pushed)
         self._tab_labels = List[List[String]]()
         self._tab_kind = List[List[Int]]()
         self._tab_sha = List[List[String]]()
+        self._tab_pushed = List[List[Bool]]()
         self._tab_cursor = List[Int]()
         self._tab_labels.append(self.picker_labels.copy())
         self._tab_kind.append(self.picker_kind.copy())
         self._tab_sha.append(self.picker_sha.copy())
+        self._tab_pushed.append(self.picker_pushed.copy())
         self._tab_cursor.append(0)
         # Branches tab: every local branch but the main line, each diffed
         # as a whole against where it forked from main.
         var b_labels = List[String]()
         var b_kind = List[Int]()
         var b_sha = List[String]()
+        var b_pushed = List[Bool]()
         self.main_branch = main_line_branch(self.root)
         self.current_branch = current_branch_name(self.root)
         if len(self.main_branch.as_bytes()) > 0:
@@ -427,9 +445,11 @@ struct ReviewMode(Movable):
                 )
                 b_kind.append(_SRC_BRANCH)
                 b_sha.append(branches[i].name)
+                b_pushed.append(True)
         self._tab_labels.append(b_labels^)
         self._tab_kind.append(b_kind^)
         self._tab_sha.append(b_sha^)
+        self._tab_pushed.append(b_pushed^)
         self._tab_cursor.append(0)
 
     def _show_tab(mut self, tab: Int):
@@ -443,6 +463,7 @@ struct ReviewMode(Movable):
         self.picker_labels = self._tab_labels[tab].copy()
         self.picker_kind = self._tab_kind[tab].copy()
         self.picker_sha = self._tab_sha[tab].copy()
+        self.picker_pushed = self._tab_pushed[tab].copy()
         self.picker_list.reset()
         var cursor = self._tab_cursor[tab]
         self.picker_list.selected = cursor \
@@ -924,6 +945,35 @@ struct ReviewMode(Movable):
             self.picker_list.paint(
                 canvas, self.pk_list_rect, self.picker_labels, True,
                 dialog_bg,
+            )
+            self._paint_unpushed_marks(canvas, dialog_bg)
+
+    def _paint_unpushed_marks(mut self, mut canvas: Canvas, body_attr: Attr):
+        """Mark the commits that aren't on a remote yet the way the git
+        view's commit list does: a ``↑`` before the SHA, both in red. The
+        arrow takes the list's indent column, so no label moves; it is
+        what still reads on the selected row, where the tint is weakest."""
+        var rect = self.pk_list_rect
+        var rows_rect = rect
+        if ScrollBarArea.overflows(rect, len(self.picker_labels)):
+            rows_rect = Rect(
+                rect.a.x, rect.a.y, rect.b.x - canvas.scroll_bar_cells,
+                rect.b.y,
+            )
+        var painter = Painter(rows_rect)
+        var first = self.picker_list.scroll()
+        for r in range(rect.height()):
+            var idx = first + r
+            if idx >= len(self.picker_pushed):
+                break
+            if self.picker_pushed[idx]:
+                continue
+            var sel = self.picker_list.is_selected(idx)
+            var bg = list_row_attr(sel, True, body_attr).bg
+            _ = painter.put_text(
+                canvas, Point(rect.a.x, rect.a.y + r),
+                String("↑") + self.picker_sha[idx],
+                Attr(LIGHT_RED if sel else RED, bg),
             )
 
     def _paint_toolbar(mut self, mut canvas: Canvas, screen: Rect):

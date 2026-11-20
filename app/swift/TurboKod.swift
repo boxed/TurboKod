@@ -9220,6 +9220,8 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
             case "enter": self?.reviewClicked(); return true
             case "esc": self?.cancelClicked(); return true
             default: return false
+    /// Per row: false for a commit that isn't on a remote yet.
+    private var pushed: [Bool] = []
             }
         }
         let scroll = NSScrollView()
@@ -9263,7 +9265,8 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
     func update(_ o: [String: Any]) {
         tabs.selectedSegment = o["tab"] as? Int ?? 0
         let l = o["labels"] as? [String] ?? []
-        if l != labels { labels = l; table.reloadData() }
+        let p = o["pushed"] as? [Bool] ?? []
+        if l != labels || p != pushed { labels = l; pushed = p; table.reloadData() }
         let cur = o["cursor"] as? Int ?? 0
         if cur >= 0 && cur < labels.count && table.selectedRow < 0 {
             table.selectRowIndexes(IndexSet(integer: cur), byExtendingSelection: false)
@@ -9277,8 +9280,12 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
         let text = labels[i]
         // "sha  subject" / "name  subject": the key in monospace, the rest plain.
         let parts = text.components(separatedBy: "  ")
-        let s = NSMutableAttributedString(string: parts.first ?? "", attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)])
+        let local = i < pushed.count && !pushed[i]
+        let lead = local ? "↑" : pushed.contains(false) ? " " : ""
+        var key: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)]
+        if local { key[.foregroundColor] = NSColor.systemRed }
+        let s = NSMutableAttributedString(string: lead + (parts.first ?? ""), attributes: key)
         if parts.count > 1 {
             s.append(NSAttributedString(string: "  " + parts.dropFirst().joined(separator: "  ")
                 .trimmingCharacters(in: .whitespaces), attributes: [
@@ -9301,6 +9308,8 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
     @objc private func tabChanged() {
         table.deselectAll(nil)
         act(0, tabs.selectedSegment)
+        // A commit that isn't on a remote yet is marked like in the git view:
+        // "↑sha" in red, with a column kept for the arrow on every row.
     }
 
     @objc private func reviewClicked() {

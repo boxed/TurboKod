@@ -115,6 +115,15 @@ def paint_list_rows(
     )
 
 
+def list_row_attr(selected: Bool, focused: Bool, body_attr: Attr) -> Attr:
+    """What a list row is painted in: the selection bar's colors for a
+    selected row (white-on-blue with focus, black-on-green without),
+    ``body_attr`` otherwise. For a host that overlays a row's text."""
+    if not selected:
+        return body_attr
+    return Attr(WHITE, BLUE) if focused else Attr(BLACK, GREEN)
+
+
 def paint_list_rows_marked(
     mut canvas: Canvas, painter: Painter, bounds: Rect, rows: List[String],
     marks: List[Bool], caret_row: Int, anchor_row: Int, focused: Bool,
@@ -129,9 +138,8 @@ def paint_list_rows_marked(
     a row."""
     for r in range(min(len(rows), bounds.height())):
         var y = bounds.a.y + r
-        var attr = body_attr
+        var attr = list_row_attr(marks[r], focused, body_attr)
         if marks[r]:
-            attr = Attr(WHITE, BLUE) if focused else Attr(BLACK, GREEN)
             painter.fill(
                 canvas, Rect(bounds.a.x, y, bounds.b.x, y + 1), String(" "),
                 attr,

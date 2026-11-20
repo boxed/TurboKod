@@ -2422,7 +2422,8 @@ def tk_desktop_review(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) abi("C") -> Int:
     """Review mode for the native host. Picking: ``{mode: "picker", tab,
-    labels, cursor}``. Reviewing: ``{mode: "reviewing", title, files:
+    labels, pushed, cursor}`` (``pushed[i]`` false for a commit that isn't
+    on a remote). Reviewing: ``{mode: "reviewing", title, files:
     [[path, added, deleted]], cur_file, change_index, change_total, num,
     den, editable, bar: {x, y, w, h}}`` with ``bar`` the toolbar row's
     cells to overlay. 0 when review isn't up natively."""
@@ -2435,6 +2436,10 @@ def tk_desktop_review(
         o.put(String("mode"), json_str(String("picker")))
         o.put(String("tab"), json_int(rv.picker_tab))
         o.put(String("labels"), json_string_array(rv.picker_labels))
+        var pushed = json_array()
+        for i in range(len(rv.picker_pushed)):
+            pushed.append(json_bool(rv.picker_pushed[i]))
+        o.put(String("pushed"), pushed)
         o.put(String("cursor"), json_int(max(rv.picker_list.selected, 0)))
         return _write_out(encode_json(o), out_ptr, cap)
     if not d.native_review_reviewing():

@@ -11,7 +11,8 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.review_mode import ReviewMode
 from turbokod.colors import (
-    Attr, LIGHT_BLUE, LIGHT_RED, STYLE_UNDERLINE, EDITOR_BG, SYN_IDENT,
+    Attr, BLACK, BLUE, LIGHT_BLUE, LIGHT_GRAY, LIGHT_RED, RED,
+    STYLE_UNDERLINE, EDITOR_BG, SYN_IDENT,
     SYN_KEYWORD, DIFF_ADD_BG, DIFF_REM_BG, DIFF_ADD_EMPH, DIFF_REM_EMPH,
     FG_TRUECOLOR, BG_TRUECOLOR
 )
@@ -847,6 +848,56 @@ def test_review_includes_added_and_deleted_files() raises:
     d.review.close()
     d._review_teardown()
     _rm_rf(dir)
+
+
+def test_review_picker_marks_commits_that_are_not_pushed() raises:
+    """The picker flags a commit no remote has, like the git view's commit
+    list: ``↑`` before the SHA, both red. The pushed commit below it, the
+    unstaged row and the branches are left alone."""
+    var dir = _init_repo_with_remote_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    assert_true(write_file(join_path(dir, String("local.txt")), String("l\n")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(
+        dir, string_list(String("commit"), String("-qm"), String("local only")),
+    )
+    assert_true(write_file(join_path(dir, String("local.txt")), String("m\n")))
+    var rv = ReviewMode()
+    rv.open(dir)
+    assert_equal(rv.picker_labels[0], String("Unstaged changes"))
+    assert_true(String("local only") in rv.picker_labels[1])
+    assert_equal(len(rv.picker_pushed), len(rv.picker_labels))
+    assert_true(rv.picker_pushed[0])
+    assert_false(rv.picker_pushed[1])
+    for i in range(2, len(rv.picker_pushed)):
+        assert_true(rv.picker_pushed[i])
+    var screen = Rect(0, 0, 100, 40)
+    var canvas = Canvas(100, 40)
+    rv.paint(canvas, screen, 1)
+    var x = rv.pk_list_rect.a.x
+    var y = rv.pk_list_rect.a.y
+    # Row 0 is selected and has no commit; row 1 is the local commit.
+    assert_equal(canvas.get(x, y).glyph, String(" "))
+    assert_equal(canvas.get(x, y + 1).glyph, String("↑"))
+    assert_equal(canvas.attr_at(x, y + 1).fg, RED)
+    assert_equal(canvas.attr_at(x + 1, y + 1).fg, RED)
+    assert_equal(canvas.attr_at(x + 1, y + 1).bg, LIGHT_GRAY)
+    assert_equal(canvas.get(x, y + 2).glyph, String(" "))
+    assert_equal(canvas.attr_at(x + 1, y + 2).fg, BLACK)
+    # Selected, it keeps the arrow and takes the selection bar's background.
+    _ = rv.handle_event(Event.key_event(KEY_DOWN), screen, 1)
+    rv.paint(canvas, screen, 1)
+    assert_equal(canvas.get(x, y + 1).glyph, String("↑"))
+    assert_equal(canvas.attr_at(x + 1, y + 1).fg, LIGHT_RED)
+    assert_equal(canvas.attr_at(x + 1, y + 1).bg, BLUE)
+    # No branch row is marked.
+    _ = rv.handle_event(Event.key_event(KEY_RIGHT), screen, 1)
+    assert_true(len(rv.picker_pushed) > 0)
+    for i in range(len(rv.picker_pushed)):
+        assert_true(rv.picker_pushed[i])
+    _rm_rf(dir)
+    _rm_rf(dir + String("_origin.git"))
 
 
 def test_review_keeps_the_keyboard_from_a_pane_focused_before_it() raises:
