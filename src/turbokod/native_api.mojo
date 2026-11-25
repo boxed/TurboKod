@@ -1338,6 +1338,16 @@ def tk_desktop_set_host_owns_shadows(h: Int, on: Int) abi("C"):
 
 
 @export
+def tk_desktop_set_panels_focused(h: Int, on: Int) abi("C"):
+    """Tell the Desktop whether its floating panels' window is the key
+    window, per frame like ``tk_desktop_set_host_focused``: the window's
+    Turbo Vision frame is drawn with double lines while it is."""
+    if h == 0:
+        return
+    _desk(h)[].panels_host_focused = on != 0
+
+
+@export
 def tk_desktop_set_host_focused(h: Int, on: Int) abi("C"):
     """Tell the Desktop whether its host window currently owns the OS
     keyboard focus (is the key window).

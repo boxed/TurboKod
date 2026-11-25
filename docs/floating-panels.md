@@ -105,11 +105,65 @@ routed through `handle_mouse(..., allow_resize=False)`, which makes
 `handle_bottom_dock_chrome_mouse` treat a bare top-border press as focus-only.
 The actual resize is owned by `Desktop._panels_drive_resize` —
 `_panel_splitter_upper` maps a press to the panel above the splitter (excluding
-the lower panel's chrome buttons; the upper must be `NORMAL`), starts its
-`dock.resizing`, and in-flight motion sets that upper panel's `preferred_height`
-(clamped to keep `DOCK_MIN_HEIGHT` rows for the lower panel(s)).
+the lower panel's chrome buttons), starts its
+`dock.resizing`, and in-flight motion moves the splitter to the pointer
+(`_panels_drag_splitter`).
 `pointer_shape_panels` shows `ns-resize` over a splitter or during a drag. A lone
 panel fills the window and has no splitter, so it's correctly non-resizable.
+
+#### A drag rolls a panel up, and opens a rolled-up one
+
+There is no height between a panel's header and `DOCK_MIN_HEIGHT`, so a resize
+drag snaps to the nearer of the two (`BottomDockedPanel.drag_height`): dragged
+below halfway the panel becomes `MINIMIZED`, and a rolled-up panel's header is
+a drag handle that opens it again. A drag that ends rolled up puts
+`preferred_height` back to what it was when the drag began (`resize_from`), so
+the restore button brings back that size, not the minimum the drag passed
+through. Docked, that is all of it: the panel's own header, `height = bottom -
+cursor`.
+
+In the floating stack the splitter sits between two panels, and
+`_panels_drag_splitter` settles both:
+
+- The **upper** panel takes the rows down to the pointer through `drag_height`,
+  so dragging the splitter up to its header rolls it up, and dragging the
+  bottom edge of a rolled-up panel down opens it.
+- When nothing under the splitter can absorb the rows — the lower panel is the
+  last one open, or it and everything after it is rolled up — the **lower**
+  panel follows the room the drag leaves it: open with room for
+  `DOCK_MIN_HEIGHT`, rolled up otherwise. That is what dragging a rolled-up
+  panel's header up from the bottom of the window does: it becomes the absorber.
+- When the upper panel is rolled up and the pointer goes above it, the nearest
+  open panel above gives up the rows and the rolled-up ones ride along, so the
+  splitter stays under the pointer.
+
+#### Drags and the maximized panel
+
+A resize drag moves the edge under the pointer and nothing else, so it never
+restores a panel as a side effect:
+
+- A panel rolled up beside a maximized one (`yielded`) drags open **beside**
+  it. `drag_height` marks it `kept_open` and clears `yielded`, so
+  `coalesce_dock_states` neither makes it yield again nor takes its opening as
+  a restore: the maximized panel stays `MAXIMIZED` and fills what is left
+  (`Desktop._dock_height` subtracts the others; in the floating stack the
+  maximized panel is the absorber wherever it sits). `kept_open` lasts until
+  another pane is maximized, the panel is rolled up, or nothing is maximized.
+  Restoring a yielded pane with its *button* still ends the maximize.
+- Docked, a maximized panel's own header drags it down to a height of its own
+  (`NORMAL`): it stays `MAXIMIZED` until the drag asks for fewer rows than it
+  has, so a press that doesn't move changes nothing. `drag_height` sets
+  `max_dragged`, and `coalesce_dock_states` then leaves the panes that yielded
+  to it rolled up instead of restoring them — a restored pane below would shift
+  the dragged pane's bottom mid-drag.
+- Floating, everything under a maximized panel hangs from the bottom of the
+  window (the maximized panel absorbs above it), so there
+  `_panels_drag_splitter` treats the splitter as the top of the *lower* panel,
+  which takes the rows from the pointer down — the docked rule. Above a
+  maximized panel the usual top-anchored rule holds.
+
+Both marks are set by the drag itself rather than read off `dock.resizing` in
+the next frame: a quick drag is over before a frame sees it.
 
 If **no** tool panels are visible, the host **orders the panel window out**
 (hides it) while leaving floating mode on — `panels_detached` stays true and the
@@ -143,6 +197,50 @@ panel) raises to `makeKeyAndOrderFront` the window, because there you *do* want 
 start typing immediately. So: new terminal/Claude pane → raise **and** focus;
 target/test/debug (re)start → raise only.
 
+#### Focusing the panels sends the other projects behind theirs
+
+With several projects open, a click on one project's floating panels used to
+leave another project's window showing in front of the one the panels belong
+to. When a panel window becomes key (`didBecomeKeyNotification` →
+`sendOtherProjectsBehind(panels:)`) the host takes each *other* project's
+window that is in front of the panels' project window
+(`NSWindow.windowNumbers`, front to back) and orders it directly **below** that
+window, back to front so they keep their order among themselves.
+
+The project's own window is deliberately **not** raised. Bringing it up under
+the panels would put it over whatever other applications' windows sit between
+the two, and focusing a panel must not reshuffle other programs' windows — the
+only windows that move are ours, and they only move down. Nothing happens
+while the project window is hidden, minimized or in another space (it isn't in
+the list then).
+
+#### The window's frame, per look
+
+The panel window is an ordinary titled window in the macOS look. The other two
+looks have no macOS title bar, so the tick swaps the window in and out of
+theirs as the look changes (each poll waits for the other's to come off first),
+and `showPanelWindow` runs both polls before the window first shows:
+
+- **Mac OS 9**: `pollPlatinumPanelChrome` puts it in a `PlatinumMainFrame`
+  (see [platinum-ui.md](platinum-ui.md)).
+- **Turbo Vision**: `pollTVPanelChrome` makes it borderless, whole cells, under
+  a `RetroShadow`, and the frame is **cells the core paints in the window's own
+  grid** (as the look's Settings and git windows do), not a wrapper view:
+  `Desktop.panels_framed(screen)` is `tv_frame()` on a grid of at least 12×6;
+  `_paint_panels_frame` draws the box with `[■]`, `project — Panels`
+  (`panels_title`) and `[▲]` on its top row, in the panes' colors
+  (`PANE_FG` on `PANE_BG`, not the editor's the project frame wears: what it
+  surrounds is panes), double lines while the window is
+  key (`panels_host_focused`, from `tk_desktop_set_panels_focused` each tick);
+  and `_panels_area` is the inside of it, which is where `_panel_window_slots`
+  lays the stack out and what the splitter drag measures against. Everything
+  that reads the slots (paint, hit-testing, pointer shapes, drops) follows.
+  The host only hit-tests the ring (`CellView.onChromeMouse`): the close box
+  docks the panels (`windowShouldClose`, as the red button does), the zoom box
+  or a double click on the title row fills the screen and back, the title row
+  drags the window, and the sides and bottom corners resize it in whole cells
+  (`pointer_shape_panels` reports `ew-resize` there).
+
 ### Menu surface
 
 A new **View ▸ Floating panels** item, checkable, action
@@ -163,6 +261,9 @@ honest the item is only added when the host owns the menu.
 
 ```c
 void    tk_desktop_set_panels_detached(int64_t h, int64_t on);
+// The panel window is the key window (per tick): its Turbo Vision frame's
+// lines are double then.
+void    tk_desktop_set_panels_focused(int64_t h, int64_t on);
 // surface = HOST_SURFACE_PANELS (1); the same three serve the host's other
 // cell windows (Settings, the dialog and git windows).
 int64_t tk_desktop_surface_layout(int64_t h, int64_t surface, int64_t cols,

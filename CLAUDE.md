@@ -112,7 +112,9 @@ full screen (Option: fills the screen), and title row carries the focused
 file's proxy icon. The declarative dialogs (pickers, Find in Project, Project
 Settings, …) open in a Turbo Vision-framed window of their own
 (`Desktop.dialog_window`, `TVDialogWindow`), as in the other looks; the git view
-gets its own cell window (`Desktop.git_window`, `TVGitWindow`). The terminal frontends keep overlapping windows — don't
+gets its own cell window (`Desktop.git_window`, `TVGitWindow`); the floating
+panels' window is borderless too, its frame cells the core paints around the
+panel stack (`Desktop.panels_framed`, `pollTVPanelChrome`). The terminal frontends keep overlapping windows — don't
 make the overlapping layout depend on anything but `host_owns_menu`. Full
 details in [docs/tv-frame.md](docs/tv-frame.md).
 

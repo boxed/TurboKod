@@ -11,7 +11,8 @@ from turbokod.canvas import Canvas, utf8_byte_cell_map
 from turbokod.painter import Painter
 from turbokod.cell import Cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, PANE_BG, default_attr
+    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE, PANE_BG, PANE_FG,
+    default_attr
 )
 from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
@@ -39,7 +40,7 @@ from turbokod.settings import Settings
 from turbokod.canvas import paint_drop_shadow
 from turbokod.terminal_pane import TerminalPane
 from turbokod.window import (
-    DockedPanelStack, PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
+    DOCK_MIN_HEIGHT, DockedPanelStack, PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
     PANEL_STATE_NORMAL, TitleCommand, WindowManager, paint_title_commands
 )
 from turbokod.debug_pane import PANE_MODE_DEBUG
@@ -1424,6 +1425,426 @@ def test_floating_panel_minimize_top_keeps_one_row() raises:
     assert_equal(slots[0].rect.b.y, 1)
     assert_equal(slots[1].rect.a.y, 1)
     assert_equal(slots[1].rect.b.y, 40)
+
+
+def _press(p: Point) -> Event:
+    return Event.mouse_event(p, MOUSE_BUTTON_LEFT, True, False)
+
+
+def _drag_to(p: Point) -> Event:
+    return Event.mouse_event(p, MOUSE_BUTTON_LEFT, True, True)
+
+
+def _release(p: Point) -> Event:
+    return Event.mouse_event(p, MOUSE_BUTTON_LEFT, False, False)
+
+
+def test_docked_panel_header_drag_opens_and_rolls_up() raises:
+    """Docked: a rolled-up pane's header is a resize handle too — dragging
+    it up opens the pane at that height — and a pane dragged down past
+    its minimum rolls up again, in the same drag or a later one, keeping
+    the height it had for the restore."""
+    var d = Desktop()
+    d.debug_pane.visible = True
+    var screen = Rect(0, 0, 80, 40)
+    var bottom = d.debug_pane_rect(screen).b.y
+    d.debug_pane.dock.set_state(PANEL_STATE_MINIMIZED)
+    assert_equal(d.debug_pane_rect(screen).a.y, bottom - 1)
+    assert_equal(
+        d.pointer_shape_at(Point(5, bottom - 1), screen), String("ns-resize"),
+    )
+    # A plain click leaves it rolled up.
+    _ = d.handle_event(_press(Point(5, bottom - 1)), screen)
+    _ = d.handle_event(_release(Point(5, bottom - 1)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_false(d.debug_pane.dock.is_resizing())
+    # Drag the header up: the pane opens under the pointer.
+    _ = d.handle_event(_press(Point(5, bottom - 1)), screen)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 10)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, 10)
+    assert_equal(d.debug_pane_rect(screen).a.y, bottom - 10)
+    # Back down, still holding: nearer the header than the minimum, it
+    # rolls up; nearer the minimum, it is the minimum.
+    _ = d.handle_event(_drag_to(Point(5, bottom - 2)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_equal(d.debug_pane.dock.preferred_height, 14)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 3)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, DOCK_MIN_HEIGHT)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 8)), screen)
+    _ = d.handle_event(_release(Point(5, bottom - 8)), screen)
+    assert_false(d.debug_pane.dock.is_resizing())
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, 8)
+    # A new drag down to the bottom rolls it up; restoring it brings
+    # back the 8 rows, not the minimum the drag passed through.
+    _ = d.handle_event(_press(Point(5, bottom - 8)), screen)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 4)), screen)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 1)), screen)
+    _ = d.handle_event(_release(Point(5, bottom - 1)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_equal(d.debug_pane_rect(screen).a.y, bottom - 1)
+    assert_equal(d.debug_pane.dock.preferred_height, 8)
+
+
+def test_docked_maximized_panel_drags_smaller() raises:
+    """Docked: a maximized pane's header drags it down to a height of
+    its own. A press that doesn't move leaves it maximized."""
+    var d = Desktop()
+    d.debug_pane.visible = True
+    var screen = Rect(0, 0, 80, 40)
+    d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    var top = d.debug_pane_rect(screen).a.y
+    var bottom = d.debug_pane_rect(screen).b.y
+    assert_equal(
+        d.pointer_shape_at(Point(5, top), screen), String("ns-resize"),
+    )
+    _ = d.handle_event(_press(Point(5, top)), screen)
+    _ = d.handle_event(_drag_to(Point(5, top)), screen)
+    _ = d.handle_event(_release(Point(5, top)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    _ = d.handle_event(_press(Point(5, top)), screen)
+    _ = d.handle_event(_drag_to(Point(5, top + 10)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, bottom - top - 10)
+    assert_equal(d.debug_pane_rect(screen).a.y, top + 10)
+    assert_equal(d.debug_pane_rect(screen).b.y, bottom)
+    _ = d.handle_event(_release(Point(5, top + 10)), screen)
+    assert_false(d.debug_pane.dock.is_resizing())
+
+
+def test_dragging_a_maximized_panel_smaller_leaves_the_others_rolled_up() raises:
+    """The panes that yielded to a maximized one come back when it is
+    restored, but not when it is dragged smaller: a pane reopening below
+    it would move the edge out from under the pointer."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # above
+    d.test_pane.visible = True    # below
+    var screen = Rect(0, 0, 80, 40)
+    d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    var top = d.debug_pane_rect(screen).a.y
+    var bottom = d.debug_pane_rect(screen).b.y
+    _ = d.handle_event(_press(Point(5, top)), screen)
+    _ = d.handle_event(_drag_to(Point(5, top + 8)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_equal(d.debug_pane_rect(screen).a.y, top + 8)
+    assert_equal(d.debug_pane_rect(screen).b.y, bottom)
+    _ = d.handle_event(_release(Point(5, top + 8)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    # The button still brings them back.
+    d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    d.test_pane.dock.set_state(PANEL_STATE_NORMAL)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    d.debug_pane.dock.set_state(PANEL_STATE_NORMAL)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+
+
+def test_dragging_a_panel_open_beside_a_maximized_one_keeps_the_maximize() raises:
+    """Docked: the pane rolled up under a maximized one drags open to see
+    more of it, and that is all that changes — the maximized pane stays
+    maximized and fills what is left, rather than restoring."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # above, maximized
+    d.test_pane.visible = True    # below, yielding
+    var screen = Rect(0, 0, 80, 40)
+    d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    d._coalesce_dock_states()
+    var top = d.debug_pane_rect(screen).a.y
+    var bottom = d.test_pane_rect(screen).b.y
+    assert_equal(d.test_pane_rect(screen).a.y, bottom - 1)
+    # The whole drag inside one frame: nothing may depend on a frame
+    # seeing it in flight.
+    _ = d.handle_event(_press(Point(5, bottom - 1)), screen)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 10)), screen)
+    _ = d.handle_event(_release(Point(5, bottom - 10)), screen)
+    d._coalesce_dock_states()
+    d._coalesce_dock_states()
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.test_pane.dock.preferred_height, 10)
+    assert_equal(d.test_pane_rect(screen).a.y, bottom - 10)
+    assert_equal(d.debug_pane_rect(screen).a.y, top)
+    assert_equal(d.debug_pane_rect(screen).b.y, bottom - 10)
+    # Resized again beside it, still maximized.
+    _ = d.handle_event(_press(Point(5, bottom - 10)), screen)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 16)), screen)
+    _ = d.handle_event(_release(Point(5, bottom - 16)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(d.test_pane.dock.preferred_height, 16)
+    # Restoring the maximized pane leaves the other at its height, and
+    # maximizing again rolls it up as before.
+    d.debug_pane.dock.set_state(PANEL_STATE_NORMAL)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.test_pane.dock.preferred_height, 16)
+    d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    # Opened and rolled up again in one drag, it is yielding as it was:
+    # restoring the maximized pane brings it back.
+    _ = d.handle_event(_press(Point(5, bottom - 1)), screen)
+    _ = d.handle_event(_drag_to(Point(5, bottom - 9)), screen)
+    d._coalesce_dock_states()
+    _ = d.handle_event(_drag_to(Point(5, bottom - 1)), screen)
+    _ = d.handle_event(_release(Point(5, bottom - 1)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    d.debug_pane.dock.set_state(PANEL_STATE_NORMAL)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.test_pane.dock.preferred_height, 16)
+
+
+def test_floating_panel_drags_open_under_a_maximized_one() raises:
+    """Floating window: the splitter under a maximized panel sizes the
+    panel below it. The maximized one stays maximized and fills the
+    rest; a press that doesn't move changes nothing."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    d._coalesce_dock_states()
+    var slots = d._panel_window_slots(screen)
+    assert_equal(slots[1].rect.a.y, 39)
+    assert_equal(
+        d.pointer_shape_panels(Point(5, 39), screen), String("ns-resize"),
+    )
+    _ = d.handle_panels_event(_press(Point(5, 39)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 39)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    _ = d.handle_panels_event(_drag_to(Point(5, 25)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 25)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.test_pane.dock.preferred_height, 15)
+    slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.a.y, 0)
+    assert_equal(slots[0].rect.b.y, 25)
+    assert_equal(slots[1].rect.a.y, 25)
+    assert_equal(slots[1].rect.b.y, 40)
+    # And back down to rolled up.
+    _ = d.handle_panels_event(_press(Point(5, 25)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 39)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 39)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.b.y, 39)
+
+
+def test_floating_panel_above_a_maximized_one_drags_open() raises:
+    """Floating window: a rolled-up panel above the maximized one opens
+    by its bottom edge, and the maximized panel fills what is left."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom, maximized
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    d.test_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
+    d._coalesce_dock_states()
+    _ = d.handle_panels_event(_press(Point(5, 1)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 12)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 12)), screen)
+    d._coalesce_dock_states()
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    var slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.b.y, 12)
+    assert_equal(slots[1].rect.a.y, 12)
+    assert_equal(slots[1].rect.b.y, 40)
+
+
+def test_floating_rolled_up_bottom_panel_drags_open() raises:
+    """Floating window: the rolled-up panel at the bottom opens when its
+    header is dragged up — it takes the rows under the pointer, the panel
+    above the rest — and rolls up again when dragged back down."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    d.test_pane.dock.set_state(PANEL_STATE_MINIMIZED)
+    assert_equal(
+        d.pointer_shape_panels(Point(5, 39), screen), String("ns-resize"),
+    )
+    _ = d.handle_panels_event(_press(Point(5, 39)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 39)), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    _ = d.handle_panels_event(_drag_to(Point(5, 20)), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    var slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.b.y, 20)
+    assert_equal(slots[1].rect.a.y, 20)
+    assert_equal(slots[1].rect.b.y, 40)
+    # Too little room left for it: rolled up, the upper panel fills.
+    _ = d.handle_panels_event(_drag_to(Point(5, 38)), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.b.y, 39)
+    # Room for the minimum is the minimum.
+    _ = d.handle_panels_event(_drag_to(Point(5, 37)), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    slots = d._panel_window_slots(screen)
+    assert_equal(slots[1].rect.a.y, 40 - DOCK_MIN_HEIGHT)
+    _ = d.handle_panels_event(_release(Point(5, 37)), screen)
+    assert_false(d.debug_pane.dock.is_resizing())
+
+
+def test_floating_splitter_rolls_the_upper_panel_up_and_opens_it() raises:
+    """Floating window: dragging a splitter up to the upper panel's
+    header rolls that panel up, and dragging the bottom edge of a
+    rolled-up panel down opens it."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    _ = d.handle_panels_event(_press(Point(5, 14)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 1)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_equal(d.debug_pane.dock.preferred_height, 14)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    var slots = d._panel_window_slots(screen)
+    assert_equal(slots[1].rect.a.y, 1)
+    _ = d.handle_panels_event(_drag_to(Point(5, 6)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, 6)
+    _ = d.handle_panels_event(_drag_to(Point(5, 0)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 0)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    # A new drag, from the rolled-up panel's bottom edge.
+    assert_equal(
+        d.pointer_shape_panels(Point(5, 1), screen), String("ns-resize"),
+    )
+    _ = d.handle_panels_event(_press(Point(5, 1)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 10)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 10)), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, 10)
+
+
+def test_floating_splitter_drag_passes_through_rolled_up_panels() raises:
+    """Floating window, three panels with the lower two rolled up:
+    dragging the bottom one's header up opens it, the rolled-up panel
+    above it rides along, and the open panel at the top gives up the
+    rows — the splitter stays under the pointer."""
+    var d = Desktop()
+    d.debug_pane.visible = True          # top
+    d.find_results_pane.visible = True   # middle
+    d.test_pane.visible = True           # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    d.find_results_pane.dock.set_state(PANEL_STATE_MINIMIZED)
+    d.test_pane.dock.set_state(PANEL_STATE_MINIMIZED)
+    _ = d.handle_panels_event(_press(Point(5, 39)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 30)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 30)), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(
+        Int(d.find_results_pane.dock.state), Int(PANEL_STATE_MINIMIZED),
+    )
+    var slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.b.y, 29)
+    assert_equal(slots[1].rect.a.y, 29)
+    assert_equal(slots[2].rect.a.y, 30)
+    assert_equal(slots[2].rect.b.y, 40)
+
+
+def _row_text(canvas: Canvas, y: Int, cols: Int) -> String:
+    var out = String("")
+    for x in range(cols):
+        out += canvas.get(x, y).glyph
+    return out^
+
+
+def test_floating_panels_window_has_a_turbo_vision_frame() raises:
+    """The Turbo Vision look in the native app: the floating panels'
+    window has no macOS title bar, so the core paints a frame around the
+    panel stack — close box, title and zoom box on its top row — and
+    lays the stack out inside it. The terminal frontends and the other
+    looks get the whole window."""
+    var d = Desktop()
+    d.debug_pane.visible = True   # top
+    d.test_pane.visible = True    # bottom
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    assert_false(d.panels_framed(screen))
+    var slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.a.x, 0)
+    assert_equal(slots[1].rect.b.y, 40)
+    d.host_owns_menu = True
+    assert_true(d.tv_frame())
+    assert_true(d.panels_framed(screen))
+    slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.a.x, 1)
+    assert_equal(slots[0].rect.b.x, 79)
+    assert_equal(slots[0].rect.a.y, 1)
+    assert_equal(slots[0].rect.b.y, 15)
+    assert_equal(slots[1].rect.a.y, 15)
+    assert_equal(slots[1].rect.b.y, 39)
+    var canvas = Canvas(80, 40)
+    canvas.clear(default_attr())
+    d.paint_panels(canvas, screen)
+    assert_equal(canvas.get(0, 0).glyph, String("┌"))
+    assert_equal(canvas.get(79, 0).glyph, String("┐"))
+    assert_equal(canvas.get(0, 39).glyph, String("└"))
+    assert_equal(canvas.get(79, 39).glyph, String("┘"))
+    assert_equal(canvas.get(0, 20).glyph, String("│"))
+    assert_equal(canvas.get(2, 0).glyph, String("■"))
+    assert_equal(canvas.get(77, 0).glyph, String("▲"))
+    assert_true(_row_text(canvas, 0, 80).find(String(" TurboKod — Panels ")) >= 0)
+    # In the panes' colors, which it surrounds, not the editor's.
+    assert_equal(Int(canvas.get(0, 0).attr.bg), Int(PANE_BG))
+    assert_equal(Int(canvas.get(0, 0).attr.fg), Int(PANE_FG))
+    assert_equal(Int(canvas.get(40, 39).attr.bg), Int(PANE_BG))
+    assert_equal(Int(canvas.get(2, 0).attr.bg), Int(PANE_BG))
+    # Double lines while the window is key.
+    d.panels_host_focused = True
+    d.paint_panels(canvas, screen)
+    assert_equal(canvas.get(0, 0).glyph, String("╔"))
+    assert_equal(canvas.get(79, 20).glyph, String("║"))
+    # The sides resize the window; the splitter inside still drags, in
+    # the stack's own rows.
+    assert_equal(
+        d.pointer_shape_panels(Point(0, 20), screen), String("ew-resize"),
+    )
+    assert_equal(
+        d.pointer_shape_panels(Point(79, 20), screen), String("ew-resize"),
+    )
+    assert_equal(
+        d.pointer_shape_panels(Point(5, 15), screen), String("ns-resize"),
+    )
+    _ = d.handle_panels_event(_press(Point(5, 15)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 21)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 21)), screen)
+    assert_equal(d.debug_pane.dock.preferred_height, 20)
+    # The bottom panel rolls up onto the row above the frame's border.
+    _ = d.handle_panels_event(_press(Point(5, 21)), screen)
+    _ = d.handle_panels_event(_drag_to(Point(5, 38)), screen)
+    _ = d.handle_panels_event(_release(Point(5, 38)), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    slots = d._panel_window_slots(screen)
+    assert_equal(slots[0].rect.b.y, 38)
+    assert_equal(slots[1].rect.a.y, 38)
+    assert_equal(slots[1].rect.b.y, 39)
+    # A window too small for a frame gets none.
+    assert_false(d.panels_framed(Rect(0, 0, 10, 4)))
 
 
 def _menu_actions(d: Desktop) -> List[String]:

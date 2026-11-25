@@ -135,8 +135,10 @@ comptime DEBUG_PANE_CLOSE    = String("debug:pane_close")
 # drag its top border to resize), ``PANEL_STATE_MINIMIZED`` (collapses
 # to the single header row so title + buttons stay visible and the user
 # can restore), ``PANEL_STATE_MAXIMIZED`` (fills the workspace so long
-# output is readable). Transitions happen via the header buttons or via
-# ESC in ``handle_key``.
+# output is readable). Transitions happen via the header buttons, via
+# ESC in ``handle_key``, or by dragging the header: up from MINIMIZED
+# opens the pane, down past the minimum height rolls it up, and down
+# from MAXIMIZED makes it NORMAL at that height.
 
 
 @fieldwise_init

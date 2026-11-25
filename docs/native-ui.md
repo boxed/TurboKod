@@ -180,7 +180,11 @@ you can hit with a mouse.
   `native_panes_shown()`, makes `paint_bottom_dock_chrome` paint the rows
   blank and arm no button or command hit zones. The whole header is then
   just the core's resize handle and focus target; `resize_grab` keeps a
-  drag from the second row from jumping.
+  drag from the second row from jumping. A rolled-up pane's header is the
+  same handle: dragging it up opens the pane, dragging a pane down past
+  its minimum rolls it up, and a maximized pane drags smaller
+  (`BottomDockedPanel.drag_height`, see
+  [floating-panels.md](floating-panels.md)).
 - `tk_desktop_panes` lists each visible pane's header: rect, `header_title()`
   (factored out of each pane's paint), state, and commands (the grid's
   `[Label]`s, minus the brackets).

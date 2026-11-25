@@ -132,6 +132,7 @@ void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
 // baking the cell shadow and tk_editor_overlay_bounds reports the box only.
 void    tk_desktop_set_host_owns_shadows(int64_t h, int64_t on);
 void    tk_desktop_set_host_focused(int64_t h, int64_t on);
+void    tk_desktop_set_panels_focused(int64_t h, int64_t on);
 void    tk_desktop_refresh_git(int64_t h);
 int64_t tk_desktop_menu_snapshot(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_menu_invoke(int64_t h, int64_t action_ptr, int64_t action_len,

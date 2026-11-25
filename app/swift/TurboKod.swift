@@ -2681,9 +2681,12 @@ final class ViewChrome {
     var platinumFrame: PlatinumMainFrame?
     var platinumScroller: PlatinumScroller?
     var platinumPanelFrame: PlatinumMainFrame?
-    /// Turbo Vision look: the frame, and the dialog window (pickers, …).
+    /// Turbo Vision look: the frame, and the dialog window (pickers, …);
+    /// a floating-panels window's shadow, there while the window is
+    /// borderless (its frame is the core's cells, `pollTVPanelChrome`).
     var tvFrame: TVMainFrame?
     var tvDialog: TVDialogWindow?
+    var tvPanelShadow: RetroShadow?
     /// macOS-style UI: the NSMenu standing in for a core popup.
     var popup: PopupMenu?
     /// The git view's window, in each look.
@@ -2744,6 +2747,7 @@ final class ViewChrome {
         platinumFrame?.retroShadow?.detach()
         platinumPanelFrame?.retroShadow?.detach()
         tvFrame?.retroShadow?.detach()
+        tvPanelShadow?.detach()
         tvDialog?.dismiss()
         gitSheet?.dismiss()
         for dc in (declarativeWindows ?? []).reversed() { dc.dismiss() }
@@ -2862,6 +2866,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if unseen != attentionBadge {
             attentionBadge = unseen
             NSApp.dockTile.badgeLabel = unseen > 0 ? String(unseen) : nil
+        }
+    }
+
+    /// `w` became key: if it's a project's floating-panels window, send
+    /// the *other* projects' windows that are in front of its project's
+    /// window to just behind that window, so the panels aren't seen over
+    /// another project's code. The project's own window is never moved:
+    /// raising it would bring it over other applications' windows, which
+    /// focusing a panel has no business doing.
+    private func sendOtherProjectsBehind(panels w: NSWindow) {
+        guard let entry = panels.first(where: { $0.value.window === w }),
+              let main = mainViewByObjectId(entry.key)?.window else { return }
+        // Front to back, the windows on screen in this space; a project
+        // window that's hidden, minimized or in another space isn't there.
+        let order = (NSWindow.windowNumbers(options: []) ?? []).map { $0.intValue }
+        guard let at = order.firstIndex(of: main.windowNumber) else { return }
+        let others = windows.filter { $0 !== main && !$0.styleMask.contains(.fullScreen) }
+        // Back to front, each to directly under `main`, which keeps their
+        // order among themselves.
+        for n in order[..<at].reversed() {
+            guard let other = others.first(where: { $0.windowNumber == n }) else { continue }
+            other.order(.below, relativeTo: main.windowNumber)
         }
     }
 
@@ -3275,6 +3301,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let keyWin = NSApp.isActive ? NSApp.keyWindow : nil
             for v in self.views where v.handle != 0 {
                 tk_desktop_set_host_focused(v.handle, (v.window === keyWin) ? 1 : 0)
+                let panelWin = self.panels[ObjectIdentifier(v)]?.window
+                tk_desktop_set_panels_focused(v.handle, (panelWin != nil && panelWin === keyWin) ? 1 : 0)
                 let req = tk_desktop_take_window_requests(
                     v.handle, Int64(WindowRequest.panelFocus | WindowRequest.panelFront
                         | WindowRequest.mainFocus))
@@ -3347,6 +3375,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else if pair.window.isVisible {
                     pair.window.orderOut(nil); changed = true; continue
                 }
+                if self.pollTVPanelChrome(pair.window, pv) { changed = true }
                 if self.pollPlatinumPanelChrome(pair.window, pv) { changed = true }
                 // The native header and debug tables track the core even
                 // while the window is covered.
@@ -3409,6 +3438,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                        object: nil, queue: .main) { [weak self] n in
             guard let self, let w = n.object as? NSWindow else { return }
             self.attentionWindowBecameKey(w)
+            self.sendOtherProjectsBehind(panels: w)
         }
         nc.addObserver(forName: NSApplication.didBecomeActiveNotification,
                        object: nil, queue: .main) { [weak self] _ in
@@ -5063,6 +5093,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let f = frame { win.setFrame(f, display: false) }
         fitWindowToScreen(win, fallback: mainWin.screen)
         tk_desktop_set_panels_detached(mainView.handle, 1)
+        // In its look's frame before it shows, not a tick after.
+        _ = pollTVPanelChrome(win, pv)
+        _ = pollPlatinumPanelChrome(win, pv)
         // orderFront (not makeKey): toggling panels on shouldn't yank keyboard
         // focus off the editor. The user clicks into the panel window when
         // they want to drive the terminal/debugger there. Skip the show when
@@ -5795,7 +5828,8 @@ extension AppController {
             removeLookFrame(win, pf, cell: pv, at: pf.restingFrame ?? win.frame)
             return true
         }
-        guard on else { return false }
+        // Wait for the Turbo Vision frame to come off first.
+        guard on, chromes[id]?.tvPanelShadow == nil else { return false }
         let f = win.frame
         let pf = PlatinumMainFrame(cell: pv)
         pf.title = win.title
@@ -5813,6 +5847,85 @@ extension AppController {
                          shadow: Platinum.castShadow(under:))
         chrome(id).platinumPanelFrame = pf
         return true
+    }
+
+    /// The floating-panels window in the Turbo Vision look: borderless, as
+    /// the project window is, with no macOS title bar. Its frame is cells
+    /// the core paints around the panel stack in the window's own grid
+    /// (`Desktop._paint_panels_frame`), so the window keeps `pv` as its
+    /// content and this only hit-tests that ring: the close box docks the
+    /// panels, the zoom box (or a double click on the title row) fills the
+    /// screen and back, the title row drags the window, and the sides and
+    /// bottom corners resize it in whole cells. Back in the system's frame
+    /// when the look changes. True when anything changed.
+    func pollTVPanelChrome(_ win: NSWindow, _ pv: CellView) -> Bool {
+        let id = ObjectIdentifier(pv)
+        let on = pv.handle != 0 && tk_desktop_tv_frame(pv.handle) != 0
+        if let shadow = chromes[id]?.tvPanelShadow {
+            if on {
+                shadow.ensureAttached()
+                return false
+            }
+            chromes[id]?.tvPanelShadow = nil
+            shadow.detach(restoreSystemShadow: true)
+            pv.onChromeMouse = nil
+            let f = win.frame
+            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            win.setFrame(f, display: true)
+            win.makeFirstResponder(pv)
+            pv.redraw()
+            return true
+        }
+        // Wait for the Mac OS 9 frame to come off first.
+        guard on, chromes[id]?.platinumPanelFrame == nil else { return false }
+        // Whole cells, top-left staying put, so the ring meets the edges.
+        let f0 = win.frame
+        let w = snapCells(f0.width, CELL_W, min: 20), h = snapCells(f0.height, CELL_H, min: 6)
+        win.styleMask = [.borderless, .miniaturizable, .resizable]
+        win.backgroundColor = .black
+        win.setFrame(NSRect(x: f0.minX, y: f0.maxY - h, width: w, height: h), display: false)
+        chrome(id).tvPanelShadow = RetroShadow(under: win)
+        var unzoomed: NSRect?
+        pv.onChromeMouse = { [weak self, weak pv] e in
+            guard let self = self, let pv = pv, let win = pv.window else { return false }
+            let p = pv.convert(e.locationInWindow, from: nil)
+            let x = Int(p.x / CELL_W), y = Int(p.y / CELL_H)
+            let c = pv.cols(), r = pv.rows()
+            // Too small for a frame: the core paints none.
+            guard c >= 12 && r >= 6 else { return false }
+            if y == 0 {
+                if (1...3).contains(x) {
+                    // The close box docks the panels, as the red button does.
+                    if AppController.pressReleased(in: pv, cellsFrom: 1, to: 3) { _ = self.windowShouldClose(win) }
+                } else if (c - 4...c - 2).contains(x) {
+                    if AppController.pressReleased(in: pv, cellsFrom: c - 4, to: c - 2) {
+                        MainWindow.toggleFill(win, &unzoomed)
+                    }
+                } else if e.clickCount == 2 {
+                    MainWindow.toggleFill(win, &unzoomed)
+                } else {
+                    win.performDrag(with: e)
+                }
+                return true
+            }
+            guard x == 0 || x >= c - 1 else { return false }
+            trackCellResize(win, left: x == 0, down: y >= r - 1, minCols: 20, minRows: 6) { pv.redraw() }
+            return true
+        }
+        win.makeFirstResponder(pv)
+        pv.redraw()
+        return true
+    }
+
+    /// Track a press on `view`'s top-row cells `a...b` until the button
+    /// comes up: true when it's released over them.
+    static func pressReleased(in view: NSView, cellsFrom a: Int, to b: Int) -> Bool {
+        guard let win = view.window else { return false }
+        let box = NSRect(x: CGFloat(a) * CELL_W, y: 0, width: CGFloat(b - a + 1) * CELL_W, height: CELL_H)
+        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if ev.type == .leftMouseUp { return box.contains(view.convert(ev.locationInWindow, from: nil)) }
+        }
+        return false
     }
 
     /// Put `v`'s window into the Turbo Vision look's frame (`TVMainFrame`)

@@ -39,6 +39,7 @@ from .cell import Cell, FONT_CODE, FONT_SLOTS, FONT_UI
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY,
+    PANE_BG, PANE_FG,
 )
 from .theme import Theme, theme_by_name
 from .events import (
@@ -1370,6 +1371,11 @@ struct Desktop(Movable):
     panels), not a dialog window of its own: Find / Replace and Settings,
     open in windows of their own, then don't own the Edit-menu actions.
     False in the terminal frontends, where both are in-grid."""
+    var panels_host_focused: Bool
+    """The floating panels' window is the host's key window
+    (``tk_desktop_set_panels_focused``, per frame): its Turbo Vision
+    frame's lines are double then, as ``host_focused`` does for the
+    project window's."""
     var panels_window_key: Bool
     """The keyboard is in the floating panels' window rather than the
     project window. Set by where the last key arrived (``handle_event`` /
@@ -2107,6 +2113,7 @@ struct Desktop(Movable):
         self.git_window_key = False
         self.git_window_docked = True
         self.project_window_key = False
+        self.panels_host_focused = False
         self.panels_window_key = False
         self.git_front_request = False
         self._last_goto_line = String("")
@@ -3504,14 +3511,23 @@ struct Desktop(Movable):
 
         Order: terminal panes (top), then the run/debug pane, then the test
         pane (bottom). Each takes its ``dock.effective_height`` (with no
-        bottom chrome, against the panel window); the **last non-minimized**
-        panel absorbs any leftover rows so the window is always fully used,
+        bottom chrome, against the panel window); the maximized panel, else
+        the **last non-minimized** one, absorbs any leftover rows so the window is always fully used,
         and an overflowing stack clamps later panels to whatever fits.
 
         The absorber is the last *non-minimized* panel rather than simply
         the last one: a minimized panel must keep its single header row even
         when it sits at the bottom, otherwise minimizing the bottom panel
-        would do nothing (it would just re-absorb every row it gave up)."""
+        would do nothing (it would just re-absorb every row it gave up).
+
+        A maximized panel is the absorber wherever it sits: it fills what
+        the others leave, including one dragged open beside it
+        (``BottomDockedPanel.kept_open``).
+
+        In the Turbo Vision look the window has a frame of cells
+        (``_paint_panels_frame``) and the stack fills the inside of it
+        (``_panels_area``)."""
+        var area = self._panels_area(screen)
         var slots = List[PanelSlot]()
         var kinds = List[Int]()
         var idxs = List[Int]()
@@ -3553,27 +3569,81 @@ struct Desktop(Movable):
                     absorber = j
                     break
                 j -= 1
+            for i in range(n):
+                if self._panel_dock(kinds[i], idxs[i]).is_maximized():
+                    absorber = i
+                    break
             var others = 0
             for i in range(n):
                 if i != absorber:
                     others += heights[i]
-            heights[absorber] = screen.b.y - others
+            heights[absorber] = area.height() - others
             if heights[absorber] < 1:
                 heights[absorber] = 1
-        var y = 0
+        var y = area.a.y
         for i in range(n):
             var top = y
             var bottom = top + heights[i]
-            if bottom > screen.b.y:
-                bottom = screen.b.y
+            if bottom > area.b.y:
+                bottom = area.b.y
             if top >= bottom:
                 slots.append(PanelSlot(kinds[i], idxs[i], Rect.empty()))
             else:
-                slots.append(
-                    PanelSlot(kinds[i], idxs[i], Rect(0, top, screen.b.x, bottom)),
-                )
+                slots.append(PanelSlot(
+                    kinds[i], idxs[i], Rect(area.a.x, top, area.b.x, bottom),
+                ))
             y = bottom
         return slots^
+
+    def panels_framed(self, screen: Rect) -> Bool:
+        """The floating panels' window wears a Turbo Vision frame of cells
+        in place of the macOS title bar: the Turbo Vision look in the
+        native app, on a window with room for one."""
+        return self.tv_frame() and screen.width() >= 12 and screen.height() >= 6
+
+    def _panels_area(self, screen: Rect) -> Rect:
+        """Where the panel stack goes in the floating panels' window: all
+        of it, or the inside of its frame."""
+        if not self.panels_framed(screen):
+            return screen
+        return Rect(screen.a.x + 1, screen.a.y + 1, screen.b.x - 1, screen.b.y - 1)
+
+    def panels_title(self) -> String:
+        """The floating panels' window's title: ``project — Panels``."""
+        var name = basename(self.project.value()) if self.project \
+            else String("TurboKod")
+        return name + String(" — Panels")
+
+    def _paint_panels_frame(self, mut canvas: Canvas, screen: Rect):
+        """The floating panels' window's Turbo Vision frame, on its own
+        grid: a box around the stack with the close box (docks the
+        panels), the title and the zoom box on its top row. The host
+        hit-tests it (``pollTVPanelChrome``): the title row drags the
+        window, the sides and bottom corners resize it.
+
+        In the panes' colors, not the editor's the project frame wears:
+        what it surrounds is panes, and their header lines run into it.
+        Double lines while the window is key, as a focused pane's header
+        is."""
+        var border = Attr(PANE_FG, PANE_BG)
+        var painter = Painter(screen)
+        painter.draw_box(canvas, screen, border, self.panels_host_focused)
+        var title = self.panels_title()
+        var w = display_columns(title)
+        var cols = screen.width()
+        # [■] on the left and [▲] on the right take five cells each, and
+        # the title keeps a space either side.
+        if cols - 10 >= w + 2:
+            var x = screen.a.x + (cols - w) // 2
+            painter.fill(
+                canvas, Rect(x - 1, screen.a.y, x + w + 1, screen.a.y + 1),
+                String(" "), border,
+            )
+            _ = painter.put_text(canvas, Point(x, screen.a.y), title, border)
+        paint_close_button(canvas, screen.a, border)
+        _ = painter.put_text(
+            canvas, Point(screen.b.x - 4, screen.a.y), String("[▲]"), border,
+        )
 
     def paint_panels(mut self, mut canvas: Canvas, screen: Rect):
         """Paint the tool panels to fill the host's separate panel window.
@@ -3584,6 +3654,8 @@ struct Desktop(Movable):
         self._sync_host_chrome()
         self._coalesce_dock_states()
         Painter(screen).fill(canvas, screen, self.bg_pattern, self.bg_attr)
+        if self.panels_framed(screen):
+            self._paint_panels_frame(canvas, screen)
         var slots = self._panel_window_slots(screen)
         if len(slots) == 0:
             var hint = String("No panels open — open a terminal with Cmd+Shift+T")
@@ -3687,8 +3759,10 @@ struct Desktop(Movable):
         so the boundary between two panels is the *lower* panel's top
         border row. A press there drags that boundary, which resizes the
         panel above it (its top stays pinned). The lower panel's chrome
-        buttons live on the same row, so they're excluded; the upper panel
-        must be NORMAL to have a resizable height at all."""
+        buttons live on the same row, so they're excluded. The upper
+        panel can be in any state: dragging a rolled-up one's bottom edge
+        down opens it, and under a maximized one the splitter sizes the
+        lower panel instead (``_panels_drag_splitter``)."""
         var prev = -1
         for i in range(len(slots)):
             if slots[i].rect.is_empty():
@@ -3705,10 +3779,7 @@ struct Desktop(Movable):
                     ).as_bytes()) > 0
                 if pos.y == lower.a.y \
                         and pos.x >= lower.a.x and pos.x < lower.b.x \
-                        and not on_button \
-                        and self._panel_dock(
-                            slots[prev].kind, slots[prev].idx,
-                        ).state == PANEL_STATE_NORMAL:
+                        and not on_button:
                     return prev
             prev = i
         return -1
@@ -3722,30 +3793,23 @@ struct Desktop(Movable):
         Unlike the docked path (bottom-anchored, ``height = bottom -
         cursor``), the floating stack is top-anchored: a panel's top is
         pinned by the panels above it, so a splitter drag sets the upper
-        panel's ``preferred_height = cursor.y - top`` directly."""
+        panel's height to ``cursor.y - top`` (``_panels_drag_splitter``)."""
         if event.kind != EVENT_MOUSE:
             return False
         # An in-flight drag owns every event until release, even when the
         # cursor wanders off the panel's rect.
-        for ref s in slots:
-            if s.rect.is_empty():
+        for i in range(len(slots)):
+            if slots[i].rect.is_empty():
                 continue
-            ref dock = self._panel_dock(s.kind, s.idx)
+            ref dock = self._panel_dock(slots[i].kind, slots[i].idx)
             if not dock.resizing:
                 continue
             if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
                 dock.resizing = False
                 return True
-            var top = s.rect.a.y
-            var want = event.pos.y - top
-            # Keep at least DOCK_MIN_HEIGHT of rows below for the lower
-            # panel(s), and the panel itself at least DOCK_MIN_HEIGHT tall.
-            var hi = screen.b.y - top - DOCK_MIN_HEIGHT
-            if want > hi:
-                want = hi
-            if want < DOCK_MIN_HEIGHT:
-                want = DOCK_MIN_HEIGHT
-            dock.preferred_height = want
+            self._panels_drag_splitter(
+                slots, i, event.pos.y, self._panels_area(screen),
+            )
             return True
         # A fresh press on a splitter starts resizing the panel above it.
         # Not a double click: that's the lower panel's header toggling
@@ -3754,11 +3818,109 @@ struct Desktop(Movable):
                 and not event.motion and event.click_count < 2:
             var upper = self._panel_splitter_upper(slots, event.pos)
             if upper >= 0:
+                # The drag may size panels on both sides of the splitter.
+                for ref s in slots:
+                    self._panel_dock(s.kind, s.idx).note_drag_start()
                 self._panel_dock(
                     slots[upper].kind, slots[upper].idx,
-                ).resizing = True
+                ).begin_resize()
                 return True
         return False
+
+    def _panels_drag_splitter(
+        mut self, slots: List[PanelSlot], upper: Int, y: Int, area: Rect,
+    ):
+        """Move the splitter under ``slots[upper]`` to row ``y``, in the
+        stack's ``area`` of the window (``_panels_area``).
+
+        The upper panel takes the rows down to ``y``
+        (``BottomDockedPanel.drag_height``: it rolls up when that is less
+        than a panel can be, and opens again from there). The rows below
+        go to the stack's absorber. When nothing under the splitter can
+        absorb them — the lower panel is the last one open, or it and
+        everything after it is rolled up — the lower panel does: it is
+        open while the drag leaves it room and rolled up otherwise, which
+        is what dragging a rolled-up panel's header up from the bottom of
+        the window does. And when the upper panel is rolled up and the
+        splitter goes above it, the nearest open panel above gives up the
+        rows, so the splitter still follows the pointer.
+
+        A maximized panel is the absorber and stays maximized. Under it
+        the stack hangs from the bottom of the window, as the docked one
+        does, so there the splitter is the top of the *lower* panel, which
+        takes the rows from ``y`` down."""
+        var lower = -1
+        for i in range(upper + 1, len(slots)):
+            if not slots[i].rect.is_empty():
+                lower = i
+                break
+        if lower < 0:
+            return
+        var maxed = -1
+        for i in range(len(slots)):
+            if maxed < 0 and not slots[i].rect.is_empty() \
+                    and self._panel_dock(
+                        slots[i].kind, slots[i].idx,
+                    ).is_maximized():
+                maxed = i
+        if maxed >= 0 and maxed <= upper:
+            var below = 0
+            for i in range(lower + 1, len(slots)):
+                below += slots[i].rect.height()
+            # The maximized panel keeps at least the minimum.
+            var most = slots[lower].rect.height() \
+                + slots[maxed].rect.height() - DOCK_MIN_HEIGHT
+            self._panel_dock(slots[lower].kind, slots[lower].idx).drag_height(
+                area.b.y - below - y, most,
+            )
+            return
+        # The panel after the lower one that takes up the slack: the
+        # maximized one, else the last one open. The others keep the rows
+        # they have.
+        var absorber = maxed
+        if maxed < 0:
+            for i in range(lower + 1, len(slots)):
+                if not slots[i].rect.is_empty() and not self._panel_dock(
+                    slots[i].kind, slots[i].idx,
+                ).is_minimized():
+                    absorber = i
+        var tail = 0
+        for i in range(lower + 1, len(slots)):
+            if i == absorber:
+                tail += DOCK_MIN_HEIGHT
+            else:
+                tail += slots[i].rect.height()
+        var lower_need = DOCK_MIN_HEIGHT
+        ref low = self._panel_dock(slots[lower].kind, slots[lower].idx)
+        if absorber > lower:
+            lower_need = slots[lower].rect.height()
+        elif not low.is_maximized():
+            var room = area.b.y - tail - y
+            if 2 * room < low.header_rows() + DOCK_MIN_HEIGHT:
+                low.set_state(PANEL_STATE_MINIMIZED)
+                lower_need = low.header_rows()
+            else:
+                low.set_state(PANEL_STATE_NORMAL)
+        var top = slots[upper].rect.a.y
+        # The lowest row the splitter can sit on.
+        var floor_y = area.b.y - tail - lower_need
+        ref up = self._panel_dock(slots[upper].kind, slots[upper].idx)
+        up.drag_height(y - top, floor_y - top)
+        var between = up.header_rows()
+        if not up.is_minimized() or y - top >= between:
+            return
+        # The upper panel is rolled up and the splitter is above where
+        # that puts it: the nearest open panel above makes the room.
+        var j = upper - 1
+        while j >= 0:
+            if not slots[j].rect.is_empty():
+                ref above = self._panel_dock(slots[j].kind, slots[j].idx)
+                if above.state == PANEL_STATE_NORMAL:
+                    var h = min(y, floor_y) - slots[j].rect.a.y - between
+                    above.preferred_height = max(h, DOCK_MIN_HEIGHT)
+                    return
+                between += above.header_rows()
+            j -= 1
 
     def key_target(self) -> KeyTarget:
         """The one answer to "where does the keyboard go?" once no modal
@@ -3927,6 +4089,10 @@ struct Desktop(Movable):
                 return String("ns-resize")
         if self._panel_splitter_upper(slots, pos) >= 0:
             return String("ns-resize")
+        # The Turbo Vision frame's sides resize the window.
+        if self.panels_framed(screen) and pos.y > screen.a.y \
+                and (pos.x == screen.a.x or pos.x == screen.b.x - 1):
+            return String("ew-resize")
         var split = self._pane_split_shape(pos)
         if len(split.as_bytes()) > 0:
             return split

@@ -517,7 +517,8 @@ struct BottomDockedPanel(Copyable, Movable):
     var resizing: Bool
     """True while the user holds the left button after pressing on the
     panel's top border. Mouse motion in this state updates
-    ``preferred_height``; the next non-pressed event clears it."""
+    ``preferred_height`` (and rolls the panel up or opens it, see
+    ``drag_height``); the next non-pressed event clears it."""
     var close_button_id: String
     """When non-empty, paint a window-style ``[■]`` close button at the
     panel's top-LEFT and dispatch clicks on it by setting
@@ -536,6 +537,11 @@ struct BottomDockedPanel(Copyable, Movable):
     """Rows between the panel's top and where the resize drag was
     grabbed, so a drag from the second header row doesn't jump."""
 
+    var resize_from: Int
+    """``preferred_height`` when the resize drag began: what a drag that
+    ends rolled up leaves behind, so restoring brings back the size the
+    panel had rather than the minimum it was dragged through."""
+
     var yielded: UInt8
     """The state to go back to once no other pane in the dock is
     maximized, while this one sits minimized to make room for it —
@@ -544,6 +550,22 @@ struct BottomDockedPanel(Copyable, Movable):
     var max_acked: Bool
     """True once ``coalesce_dock_states`` has seen this panel maximized,
     so a pane maximized after it wins over it."""
+
+    var kept_open: Bool
+    """The user dragged this panel open beside a maximized one: it keeps
+    the height it was dragged to instead of yielding, and the maximized
+    panel fills what is left. Until another pane is maximized, this one
+    is rolled up again, or nothing is maximized any more."""
+
+    var max_dragged: Bool
+    """Set when a resize drag takes this panel out of MAXIMIZED, for
+    ``coalesce_dock_states`` to take: the panes that yielded to it then
+    stay rolled up. A flag rather than ``resizing``, which a quick drag
+    has already cleared by the next frame."""
+
+    var resize_yielded: UInt8
+    """``yielded`` when the resize drag began, which a drag that opens a
+    yielded panel and rolls it up again puts back."""
 
     var attention_unseen: Int
     """Attention events (a Claude turn finishing, a debugger stop) this
@@ -569,8 +591,12 @@ struct BottomDockedPanel(Copyable, Movable):
         self.close_button_id = String("")
         self.host_chrome = False
         self.resize_grab = 0
+        self.resize_from = preferred_height
         self.yielded = PANEL_STATE_NONE
         self.max_acked = False
+        self.kept_open = False
+        self.max_dragged = False
+        self.resize_yielded = PANEL_STATE_NONE
         self.attention_unseen = 0
         self.flash_start_ms = -1
 
@@ -637,25 +663,57 @@ struct BottomDockedPanel(Copyable, Movable):
             return avail
         return self.preferred_height
 
-    def clamp_height(self, want: Int, panel: Rect) -> Int:
-        """Pin a proposed height to a usable range. Lower bound keeps
-        the title bar plus a couple of body rows on container_bounds; upper
-        bound leaves at least 5 rows of workspace above the panel."""
+    def begin_resize(mut self, grab: Int = 0):
+        """Start a resize drag, grabbed ``grab`` rows below the panel's
+        top. ``drag_height`` then sizes it until the button is released."""
+        self.resizing = True
+        self.resize_grab = grab
+        self.note_drag_start()
+
+    def note_drag_start(mut self):
+        """Remember what a drag that ends rolled up puts back. For the
+        panel being dragged and any other a drag may size (the floating
+        stack's splitter sizes the panels on both sides of it)."""
+        self.resize_from = self.preferred_height
+        self.resize_yielded = self.yielded
+
+    def drag_height(mut self, want: Int, hi: Int):
+        """Size the panel as a resize drag asks: ``want`` rows, at most
+        ``hi``. There is no height between the header and
+        ``DOCK_MIN_HEIGHT``, so the drag snaps to the nearer one: dragged
+        below halfway the panel rolls up (MINIMIZED, keeping the height
+        it had before the drag for the restore), and from there dragging
+        back out opens it again. A maximized panel becomes NORMAL at the
+        height asked for; the caller leaves it alone until the drag asks
+        for less than it has. A panel rolled up beside a maximized one
+        opens beside it (``kept_open``): the maximized panel stays
+        maximized and fills what is left. Changes ``state`` directly,
+        since ``set_state`` would end the drag."""
+        if self.state == PANEL_STATE_MAXIMIZED:
+            self.max_dragged = True
+        if 2 * want < self.header_rows() + DOCK_MIN_HEIGHT:
+            self.state = PANEL_STATE_MINIMIZED
+            self.preferred_height = self.resize_from
+            self.yielded = self.resize_yielded
+            self.kept_open = False
+            return
         var h = want
-        var hi = panel.b.y - 5
         if h > hi:
             h = hi
         if h < DOCK_MIN_HEIGHT:
             h = DOCK_MIN_HEIGHT
-        return h
+        self.state = PANEL_STATE_NORMAL
+        self.preferred_height = h
+        if self.yielded != PANEL_STATE_NONE:
+            self.yielded = PANEL_STATE_NONE
+            self.kept_open = True
 
     def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
-        """Hit-test the top-border row — the drag handle. Resize is
-        only available in NORMAL state, and the button cells (top-
-        right) are excluded so the cursor stays default over them."""
+        """Hit-test the header — the drag handle in every state: a
+        rolled-up panel's opens it, a maximized one's drags it smaller.
+        The button cells (top-right) are excluded so the cursor stays
+        default over them."""
         if panel.is_empty():
-            return False
-        if self.state != PANEL_STATE_NORMAL:
             return False
         if pos.y < panel.a.y or pos.y >= panel.a.y + self.header_rows():
             return False
@@ -670,7 +728,8 @@ def dock_coalesces(dock: BottomDockedPanel) -> Bool:
     """Whether ``coalesce_dock_states`` has anything to do for ``dock``:
     with no pane maximized, yielded or acknowledged it changes nothing."""
     return dock.state == PANEL_STATE_MAXIMIZED \
-        or dock.yielded != PANEL_STATE_NONE or dock.max_acked
+        or dock.yielded != PANEL_STATE_NONE or dock.max_acked \
+        or dock.kept_open or dock.max_dragged
 
 
 def coalesce_dock_states(mut docks: List[BottomDockedPanel]):
@@ -682,13 +741,27 @@ def coalesce_dock_states(mut docks: List[BottomDockedPanel]):
     their states. A pane maximized since the last run wins over one
     maximized before it. The others yield: they minimize and remember
     the state they had, which they get back when nothing is maximized
-    any more. Restoring a yielded pane ends the maximize, since the user
-    asked to see it."""
+    any more. Restoring a yielded pane with its button ends the maximize,
+    since the user asked to see it.
+
+    Resize drags move only the edge under the pointer. A yielded pane
+    dragged open is ``kept_open``: it has its height, the maximized pane
+    stays maximized and fills the rest. And a maximized pane dragged
+    smaller (``max_dragged``) leaves the panes that yielded to it rolled
+    up instead of bringing them back."""
     var n = len(docks)
+    var dragged = False
+    for i in range(n):
+        if docks[i].max_dragged:
+            dragged = True
+            docks[i].max_dragged = False
     var winner = -1
     for i in range(n):
         if docks[i].state == PANEL_STATE_MAXIMIZED and not docks[i].max_acked:
             winner = i
+    # A pane maximized just now: every other pane yields to it, the ones
+    # kept open beside the last maximized pane too.
+    var fresh = winner >= 0
     if winner < 0:
         for i in range(n):
             if docks[i].state == PANEL_STATE_MAXIMIZED:
@@ -707,14 +780,21 @@ def coalesce_dock_states(mut docks: List[BottomDockedPanel]):
     if winner < 0:
         for i in range(n):
             if docks[i].yielded != PANEL_STATE_NONE:
-                docks[i].set_state(docks[i].yielded)
+                if not dragged:
+                    docks[i].set_state(docks[i].yielded)
                 docks[i].yielded = PANEL_STATE_NONE
             docks[i].max_acked = False
+            docks[i].kept_open = False
         return
+    docks[winner].kept_open = False
     for i in range(n):
         if i == winner:
             continue
         docks[i].max_acked = False
+        if docks[i].kept_open:
+            if docks[i].state == PANEL_STATE_NORMAL and not fresh:
+                continue
+            docks[i].kept_open = False
         if docks[i].state == PANEL_STATE_MAXIMIZED:
             docks[i].yielded = PANEL_STATE_NORMAL
         elif docks[i].state == PANEL_STATE_NORMAL:
@@ -905,7 +985,9 @@ def handle_bottom_dock_chrome_mouse(
     resize drag.
 
     Mutates ``dock`` (toggle state, start/end resize drag, update
-    preferred_height, set pending_command_id). Returns
+    preferred_height, set pending_command_id). The resize drag starts on
+    a rolled-up panel's header too and can end there: see
+    ``BottomDockedPanel.drag_height``. Returns
     ``(consumed, focus_request)`` so the caller can apply its own
     focus flag without the helper needing a mut reference to it.
 
@@ -930,9 +1012,13 @@ def handle_bottom_dock_chrome_mouse(
         if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
             dock.resizing = False
             return DockChromeMouseResult(True, False)
-        dock.preferred_height = dock.clamp_height(
-            panel.b.y - event.pos.y + dock.resize_grab, panel,
-        )
+        var want = panel.b.y - event.pos.y + dock.resize_grab
+        # A maximized panel stays maximized until it is dragged smaller:
+        # a press that doesn't move, or moves up, changes nothing.
+        if dock.is_maximized() and want >= panel.height():
+            return DockChromeMouseResult(True, False)
+        # At most up to 5 rows of workspace left above the panel.
+        dock.drag_height(want, panel.b.y - 5)
         return DockChromeMouseResult(True, False)
     if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
         if dock.chrome_hits.on_close(event.pos):
@@ -957,10 +1043,9 @@ def handle_bottom_dock_chrome_mouse(
         if len(cmd_id.as_bytes()) > 0:
             dock.pending_command_id = cmd_id^
             return DockChromeMouseResult(True, True)
-        # Drag-to-resize is NORMAL-only (and only when the caller allows
-        # self-resize); in min/max — or in the floating window, where the
-        # host drives splitter resize — the top border is just a chrome
-        # strip and clicks there focus the pane.
+        # Drag-to-resize needs a caller that allows self-resize; in the
+        # floating window, where the host drives splitter resize, the top
+        # border is just a chrome strip and clicks there focus the pane.
         var on_header = event.pos.y >= panel.a.y \
             and event.pos.y < panel.a.y + dock.header_rows() \
             and event.pos.x >= panel.a.x and event.pos.x < panel.b.x
@@ -973,10 +1058,13 @@ def handle_bottom_dock_chrome_mouse(
             else:
                 dock.set_state(PANEL_STATE_MINIMIZED)
             return DockChromeMouseResult(True, True)
-        if allow_resize and dock.state == PANEL_STATE_NORMAL and on_header:
-            dock.resizing = True
-            dock.resize_grab = event.pos.y - panel.a.y
-            return DockChromeMouseResult(True, False)
+        if allow_resize and on_header:
+            dock.begin_resize(event.pos.y - panel.a.y)
+            # A rolled-up or maximized panel's header press focuses it as
+            # well as starting the drag, as it did before it could drag.
+            return DockChromeMouseResult(
+                True, dock.state != PANEL_STATE_NORMAL,
+            )
         if on_header:
             return DockChromeMouseResult(True, True)
     return DockChromeMouseResult(False, False)

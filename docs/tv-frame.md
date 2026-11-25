@@ -83,6 +83,15 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
 - A borderless window doesn't close, zoom or minimize from the Window menu on
   its own; `MainWindow` covers that for both borderless looks.
 
+## The floating-panels window
+
+With View ▸ Floating panels on, the panels' window is borderless in this look
+too, in a Turbo Vision frame — close box (docks the panels), `project —
+Panels`, zoom box. Unlike the project window's ring, the core paints it in the
+window's own grid around the panel stack (`Desktop._paint_panels_frame`,
+`_panels_area`) and the host only hit-tests it (`pollTVPanelChrome`). Details
+in [floating-panels.md](floating-panels.md#the-windows-frame-per-look).
+
 ## Dialog windows
 
 The git view gets a non-modal window of its own (`TVGitWindow`, a `.git`
