@@ -32,6 +32,12 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
   directly over the status bar, and like it outside the frame. The row above
   it is the frame's bottom border, painted by `_paint_frame_bottom`; the file
   tree stops above that (`FileTree.bottom`). `_frame_rows` gates all of it on a screen tall enough.
+- When the tabs don't fit, the bar scrolls (`TabBar.scroll`): the focused tab
+  is scrolled into view whenever focus moves, a tab opens or closes, or the
+  bar's width changes; the wheel scrolls it by hand (a trackpad swipe over it
+  comes in through `tk_desktop_tab_bar_hscroll` instead of scrolling the
+  editor), and the end margins become `◄` / `►` arrows that step a tab.
+  The terminal frontends' tab bar is the same widget.
 - `paint_frame` paints the rest of the frame on the window's **whole** grid:
   the top row (close box, the proxy icon's two blank cells, the title, the
   zoom box), the sides, the bottom corners, and the gray cells beside the

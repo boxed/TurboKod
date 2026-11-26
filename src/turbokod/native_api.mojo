@@ -598,6 +598,22 @@ def tk_desktop_hscroll_by(h: Int, cols: Int, screen_cols: Int, screen_rows: Int)
 
 
 @export
+def tk_desktop_tab_bar_hscroll(
+    h: Int, cols: Int, x: Int, y: Int, screen_cols: Int, screen_rows: Int,
+) abi("C") -> Int:
+    """A horizontal scroll (trackpad swipe / Shift+wheel) with the pointer at
+    cell ``(x, y)``: 1 when that's over the in-grid tab bar, which then
+    scrolled by ``cols`` columns — the host repaints and doesn't scroll the
+    focused editor. 0 when the pointer is elsewhere."""
+    if h == 0:
+        return 0
+    var moved = _desk(h)[].tab_bar_hscroll(
+        cols, Point(x, y), Rect(0, 0, screen_cols, screen_rows),
+    )
+    return 1 if moved else 0
+
+
+@export
 def tk_desktop_vscroll_active(h: Int) abi("C") -> Int:
     """1 while a window-border vertical-scrollbar thumb drag is in progress
     (the press landed on the thumb). The host polls this right after a

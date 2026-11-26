@@ -243,7 +243,7 @@ from .drafts_store import (
     StoredDraft, encode_drafts, load_drafts, save_drafts,
 )
 from .status import StatusBar, StatusTab, status_error_attr
-from .tab_bar import TabBar, TabBarItem
+from .tab_bar import TAB_BAR_CONSUMED, TabBar, TabBarItem
 from .settings import Settings
 from .project_settings import ProjectSettings
 from .symbol_pick import SymbolPick
@@ -2973,6 +2973,17 @@ struct Desktop(Movable):
         var before = self.windows.windows[idx].editor.scroll_x
         self.windows.windows[idx].h_scroll_by(cols)
         return self.windows.windows[idx].editor.scroll_x != before
+
+    def tab_bar_hscroll(mut self, cols: Int, pos: Point, screen: Rect) -> Bool:
+        """A horizontal scroll with the pointer at ``pos``: when that's on
+        the in-grid tab bar, scroll the bar by ``cols`` columns (negative =
+        left) and return True — the caller then doesn't scroll the focused
+        editor. False when the pointer is elsewhere."""
+        var rect = self.tab_bar_rect(screen)
+        if rect.width() <= 0 or rect.height() <= 0 or not rect.contains(pos):
+            return False
+        _ = self.tab_bar.scroll_by(cols)
+        return True
 
     def vscroll_dragging(self) -> Bool:
         """True while a window-border v-scrollbar thumb drag is in progress."""
@@ -8733,6 +8744,8 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 WINDOW_FOCUS_PREFIX + String(win_tab), screen,
             )
+        if win_tab == TAB_BAR_CONSUMED:
+            return Optional[String]()
         # Pane routing: each pane's ``handle_mouse`` flips its own
         # ``focused`` flag when a click lands inside its rect; we then
         # rebroadcast through ``_focus_dock`` so every other dock drops

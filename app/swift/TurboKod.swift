@@ -2359,6 +2359,14 @@ final class CellView: NSView {
             cols = delta > 0 ? -3 : 3
         }
         if cols == 0 { return }
+        // Over the in-grid tab bar the swipe scrolls the tabs, not the editor.
+        let p = convert(e.locationInWindow, from: nil)
+        if surface == .main, tk_desktop_tab_bar_hscroll(handle, Int64(cols),
+                                      Int64(max(0, p.x) / CELL_W), Int64(max(0, p.y) / CELL_H),
+                                      Int64(self.cols()), Int64(rows())) != 0 {
+            needsDisplay = true
+            return
+        }
         if tk_desktop_hscroll_by(handle, Int64(cols),
                                  Int64(self.cols()), Int64(rows())) != 0 {
             needsDisplay = true
@@ -6429,31 +6437,58 @@ struct TabInfo: Equatable {
     }
 }
 
-/// Tab widths for a strip: each tab its `natural` width, unless they don't
-/// all fit in `avail` — then the widest shrink to the largest shared cap
-/// `c` with sum(min(w, c)) <= avail (never below `minW`), so short names
-/// never pay for long ones. `whole` rounds the cap down to a whole point.
-func fitTabWidths(_ natural: [CGFloat], avail: CGFloat, minW: CGFloat, whole: Bool = false) -> [CGFloat] {
-    guard natural.reduce(0, +) > avail, !natural.isEmpty else { return natural }
-    let sorted = natural.sorted()
-    var rest = avail
-    var cap = minW
-    for (k, w) in sorted.enumerated() {
-        var share = rest / CGFloat(sorted.count - k)
-        if whole { share = floor(share) }
-        if w <= share { rest -= w } else { cap = max(minW, share); break }
+/// Horizontal scrolling for a tab strip whose tabs don't fit (each tab
+/// is as wide as its whole file name): the wheel (either axis) scrolls it, and the focused tab is
+/// scrolled into view whenever focus moves, a tab opens or closes, or
+/// the strip is resized — between those the user's scroll stands. The
+/// strip lays tabs out in content coordinates, draws translated by `-x`
+/// and hit-tests at `x + point.x`.
+struct TabStripScroll {
+    private(set) var x: CGFloat = 0
+    private var lastFocused = -2
+    private var lastCount = -1
+    private var lastWidth: CGFloat = -1
+    /// The tabs' extent, end margin included.
+    private var content: CGFloat = 0
+
+    /// After a layout: keep `x` in range and, if focus, the tab count or
+    /// the width changed, bring `frames[focused]` into view (clear of
+    /// the strip's `margin` at either end).
+    mutating func settle(frames: [NSRect], focused: Int, width: CGFloat, margin: CGFloat) {
+        let content = (frames.map { $0.maxX }.max() ?? 0) + margin
+        if focused != lastFocused || frames.count != lastCount || width != lastWidth {
+            lastFocused = focused
+            lastCount = frames.count
+            lastWidth = width
+            if focused >= 0 && focused < frames.count {
+                let r = frames[focused]
+                if r.minX - margin < x { x = r.minX - margin }
+                else if r.maxX + margin > x + width { x = r.maxX + margin - width }
+            }
+        }
+        x = min(max(0, x), max(0, content - width))
+        self.content = content
     }
-    return natural.map { min($0, cap) }
+
+    /// Whether the tabs overflow a strip `width` wide.
+    func overflows(_ width: CGFloat) -> Bool { content > width + 0.5 }
+
+    /// Scroll by a wheel event; true when it moved. A vertical wheel
+    /// scrolls sideways too — the strip has no other axis.
+    mutating func scroll(_ e: NSEvent, width: CGFloat) -> Bool {
+        let d = abs(e.scrollingDeltaX) > abs(e.scrollingDeltaY) ? e.scrollingDeltaX : e.scrollingDeltaY
+        let before = x
+        x = min(max(0, x - (e.hasPreciseScrollingDeltas ? d : d * 16)), max(0, content - width))
+        return x != before
+    }
 }
 
 final class TabStripView: NSView {
     static let height: CGFloat = 30
-    private static let maxTabW: CGFloat = 260
     private static let minTabW: CGFloat = 64
     private static let closeSize: CGFloat = 16
-    // A roomy tab: close button 5pt in, the title right after it, 8pt of
-    // air on the right. A squeezed tab gives the close slot to the title
-    // (the button then overlays the name's start, on hover only).
+    // Close button 5pt in, the title right after it, 8pt of air on the
+    // right.
     private static let pad: CGFloat = 8
     private static let closeSlot: CGFloat = 5 + closeSize
 
@@ -6464,11 +6499,21 @@ final class TabStripView: NSView {
     private var hoverClose = false
     private var frames: [NSRect] = []
     private var layoutWidth: CGFloat = -1
+    private var scroll = TabStripScroll()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
 
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // Since macOS 14 a view draws past its bounds by default: a tab
+        // scrolled to the edge would paint outside the strip.
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     /// Adopt a `tk_desktop_tabs` payload; true when it changed anything.
     func update(from data: Data) -> Bool {
@@ -6484,34 +6529,59 @@ final class TabStripView: NSView {
     }
 
     private static func font(selected: Bool) -> NSFont {
-        .systemFont(ofSize: 12, weight: selected ? .medium : .regular)
+        .systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
+    }
+
+    /// The band the inactive tabs sit in: a shade off the title bar, so
+    /// the selected tab reads as raised out of it.
+    private static let band = NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 0, alpha: 0.22) : NSColor(white: 0, alpha: 0.07)
+    }
+    /// The selected tab: white in light mode, a light gray well above the
+    /// band in dark mode (the text background would sit *below* it).
+    private static let selectedFill = NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 0.36, alpha: 1) : .white
     }
 
     private func titleWidth(_ s: String, selected: Bool) -> CGFloat {
         ceil((s as NSString).size(withAttributes: [.font: Self.font(selected: selected)]).width)
     }
 
-    /// Tabs take their title's width. Only when they don't all fit do the
-    /// widest shrink — down to a shared cap, so short names never pay for
-    /// long ones.
+    /// Every tab is as wide as its whole title; when they don't all fit
+    /// the strip scrolls.
     private func layoutTabs() {
         guard layoutWidth != bounds.width else { return }
         layoutWidth = bounds.width
-        let natural = tabs.indices.map { naturalWidth($0) }
-        let widths = fitTabWidths(natural, avail: bounds.width - 16, minW: Self.minTabW)
         var x: CGFloat = 8
-        frames = widths.map { w in
+        frames = tabs.indices.map { naturalWidth($0) }.map { w in
             defer { x += w }
             return NSRect(x: x, y: 3, width: w, height: bounds.height - 6)
+        }
+        scroll.settle(frames: frames, focused: focused, width: bounds.width, margin: 8)
+    }
+
+    /// An event's location in the (scrolled) tab layout.
+    private func local(_ e: NSEvent) -> NSPoint {
+        layoutTabs()
+        var p = convert(e.locationInWindow, from: nil)
+        p.x += scroll.x
+        return p
+    }
+
+    override func scrollWheel(with e: NSEvent) {
+        layoutTabs()
+        guard scroll.overflows(bounds.width) else { return super.scrollWheel(with: e) }
+        if scroll.scroll(e, width: bounds.width) {
+            setHover(local(e))
+            needsDisplay = true
         }
     }
 
     private func naturalWidth(_ i: Int) -> CGFloat {
-        min(Self.maxTabW, max(Self.minTabW,
-            titleWidth(tabs[i].title, selected: true) + Self.closeSlot + 2 * Self.pad))
+        max(Self.minTabW, titleWidth(tabs[i].title, selected: true) + Self.closeSlot + 2 * Self.pad)
     }
-
-    private func squeezed(_ i: Int) -> Bool { tabRect(i).width < naturalWidth(i) - 0.5 }
 
     private func tabRect(_ i: Int) -> NSRect {
         layoutTabs()
@@ -6529,45 +6599,38 @@ final class TabStripView: NSView {
         return -1
     }
 
-    /// `title` cut to `width`: the extension goes first (it's the least
-    /// telling part of a file name), then the end of the stem.
-    private func fitted(_ title: String, _ width: CGFloat, selected: Bool) -> String {
-        if titleWidth(title, selected: selected) <= width { return title }
-        var stem = title
-        if let dot = title.lastIndex(of: "."), dot != title.startIndex {
-            stem = String(title[..<dot])
-            if titleWidth(stem, selected: selected) <= width { return stem }
-        }
-        var chars = Array(stem)
-        while chars.count > 1 {
-            chars.removeLast()
-            let s = String(chars) + "…"
-            if titleWidth(s, selected: selected) <= width { return s }
-        }
-        return String(chars) + "…"
-    }
-
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         layoutWidth = -1
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        Self.band.setFill()
+        bounds.fill(using: .sourceOver)
         NSColor.separatorColor.setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        layoutTabs()
+        NSGraphicsContext.current?.cgContext.translateBy(x: -scroll.x, y: 0)
         for i in tabs.indices {
             let r = tabRect(i)
             let selected = i == focused
             if selected {
                 let path = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-                NSColor.controlBackgroundColor.setFill()
+                NSGraphicsContext.saveGraphicsState()
+                let shadow = NSShadow()
+                shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+                shadow.shadowBlurRadius = 2
+                shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+                shadow.set()
+                Self.selectedFill.setFill()
                 path.fill()
+                NSGraphicsContext.restoreGraphicsState()
                 NSColor.separatorColor.setStroke()
                 path.lineWidth = 0.5
                 path.stroke()
             } else {
                 if i == hover {
-                    NSColor.labelColor.withAlphaComponent(0.06).setFill()
+                    NSColor.labelColor.withAlphaComponent(0.08).setFill()
                     NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
                 }
                 // Hairline divider, skipped next to the selected tab.
@@ -6581,14 +6644,9 @@ final class TabStripView: NSView {
                 .font: font,
                 .foregroundColor: selected ? NSColor.labelColor : NSColor.secondaryLabelColor,
             ]
-            // Squeezed: the title takes the close slot (minus room for an
-            // unsaved dot); the close button overlays it on hover.
-            let left: CGFloat = squeezed(i) ? (tabs[i].dirty ? 19 : Self.pad)
-                                            : Self.pad + Self.closeSlot - 4
-            let room = max(0, r.width - left - Self.pad)
-            let text = fitted(tabs[i].title, room, selected: selected)
+            let left = Self.pad + Self.closeSlot - 4
             let textH = font.ascender - font.descender + font.leading
-            (text as NSString).draw(at: NSPoint(x: r.minX + left, y: r.midY - textH / 2),
+            (tabs[i].title as NSString).draw(at: NSPoint(x: r.minX + left, y: r.midY - textH / 2),
                                     withAttributes: attrs)
             drawCloseOrDot(i, selected: selected)
         }
@@ -6597,11 +6655,6 @@ final class TabStripView: NSView {
     private func drawCloseOrDot(_ i: Int, selected: Bool) {
         let c = closeRect(i)
         if i == hover {
-            if squeezed(i) {
-                // Overlays the title's first letters: give it a backing.
-                (selected ? NSColor.controlBackgroundColor : NSColor.windowBackgroundColor).setFill()
-                NSBezierPath(roundedRect: c.insetBy(dx: -2, dy: -1), xRadius: 4, yRadius: 4).fill()
-            }
             if hoverClose {
                 NSColor.labelColor.withAlphaComponent(0.1).setFill()
                 NSBezierPath(roundedRect: c, xRadius: 4, yRadius: 4).fill()
@@ -6644,11 +6697,11 @@ final class TabStripView: NSView {
         }
     }
 
-    override func mouseMoved(with e: NSEvent) { setHover(convert(e.locationInWindow, from: nil)) }
+    override func mouseMoved(with e: NSEvent) { setHover(local(e)) }
     override func mouseExited(with e: NSEvent) { setHover(nil) }
 
     override func mouseDown(with e: NSEvent) {
-        let p = convert(e.locationInWindow, from: nil)
+        let p = local(e)
         let i = index(at: p)
         guard i >= 0 else { return }
         if closeRect(i).contains(p) { onClose?(i) } else { onSelect?(i) }
@@ -6656,12 +6709,12 @@ final class TabStripView: NSView {
 
     override func otherMouseDown(with e: NSEvent) {
         // Middle click closes, as in every browser.
-        let i = index(at: convert(e.locationInWindow, from: nil))
+        let i = index(at: local(e))
         if i >= 0 && e.buttonNumber == 2 { onClose?(i) }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        let i = index(at: convert(event.locationInWindow, from: nil))
+        let i = index(at: local(event))
         guard i >= 0 else { return nil }
         let menu = NSMenu()
         menu.addItem(TabMenuItem("Close Tab") { [weak self] in self?.onClose?(i) })
@@ -12449,11 +12502,12 @@ enum Platinum {
     /// trapezoid with a rounded top, lit down its left side and shaded
     /// down its right. Every tab stands on the pane's edge; the selected
     /// one is the pane's face and runs on through that edge to join it.
+    /// `back` is an unselected tab's face gray (the HIG's by default).
     /// Returns the rect for its label.
-    static func tab(_ t: NSRect, selected sel: Bool, tabH: CGFloat) -> NSRect {
+    static func tab(_ t: NSRect, selected sel: Bool, tabH: CGFloat, back: Int = 0xCE) -> NSRect {
         let n = Int(tabH) - 1
         let l0 = Int(t.minX), r0 = Int(t.maxX) - 1, top = Int(t.minY)
-        let faceV = sel ? 0xEF : 0xCE
+        let faceV = sel ? 0xEF : back
         func px(_ x: Int, _ y: Int, _ v: Int) {
             fill(NSRect(x: CGFloat(x), y: CGFloat(y), width: 1, height: 1), gray(v))
         }
@@ -14941,11 +14995,19 @@ final class PlatinumGrowBox: NSView {
 /// and an unsaved tab a dot where that box goes.
 final class PlatinumTabStrip: NSView {
     private static let tabH: CGFloat = 22
-    static let height: CGFloat = tabH + 1
-    private static let maxTabW: CGFloat = 220
+    /// Air between the title bar and the tabs' tops.
+    private static let gap: CGFloat = 6
+    static let height: CGFloat = gap + tabH + 1
     private static let minTabW: CGFloat = 60
     /// The close box / unsaved dot, left of the title.
     private static let slot: CGFloat = 16
+    /// An unselected tab's face: darker than the HIG's 0xCE (kept by the
+    /// Settings dialog's tabs), so the window's tabs read apart from the
+    /// strip behind them and from the selected one.
+    private static let unselectedBack = 0xBD
+    /// The strip behind the tabs while the window isn't key: a step down
+    /// from the frame's face, so a background window's tab row recedes.
+    private static let inactiveBack = Platinum.gray(0xCE)
 
     private(set) var tabs: [TabInfo] = []
     private(set) var focused = -1
@@ -14953,11 +15015,21 @@ final class PlatinumTabStrip: NSView {
     private var frames: [NSRect] = []
     private var layoutWidth: CGFloat = -1
     private var closePressed = false { didSet { needsDisplay = true } }
+    private var scroll = TabStripScroll()
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
 
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // Since macOS 14 a view draws past its bounds by default: a tab
+        // scrolled to the edge would paint over the window frame.
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     /// Adopt a `tk_desktop_tabs` payload; true when it changed anything.
     func update(from data: Data) -> Bool {
@@ -14976,20 +15048,33 @@ final class PlatinumTabStrip: NSView {
         layoutWidth = -1
     }
 
-    /// Tabs take their title's width; when they don't all fit, the widest
-    /// shrink to a shared cap.
+    /// Every tab is as wide as its whole title; when they don't all fit
+    /// the strip scrolls.
     private func layoutTabs() {
         guard layoutWidth != bounds.width else { return }
         layoutWidth = bounds.width
-        let natural = tabs.map { min(Self.maxTabW, max(Self.minTabW, Platinum.width($0.title) + Self.slot + 30)) }
-        let avail = bounds.width - 16 + CGFloat(max(0, tabs.count - 1))
-        let widths = fitTabWidths(natural, avail: avail, minW: Self.minTabW, whole: true)
+        let widths = tabs.map { max(Self.minTabW, ceil(Platinum.width($0.title)) + Self.slot + 30) }
         var x: CGFloat = 8
 
         frames = widths.map { w in
             defer { x += w - 1 }
-            return NSRect(x: x, y: 0, width: w, height: Self.tabH)
+            return NSRect(x: x, y: Self.gap, width: w, height: Self.tabH)
         }
+        scroll.settle(frames: frames, focused: focused, width: bounds.width, margin: 8)
+    }
+
+    /// An event's location in the (scrolled) tab layout.
+    private func local(_ e: NSEvent) -> NSPoint {
+        layoutTabs()
+        var p = convert(e.locationInWindow, from: nil)
+        p.x += scroll.x
+        return p
+    }
+
+    override func scrollWheel(with e: NSEvent) {
+        layoutTabs()
+        guard scroll.overflows(bounds.width) else { return super.scrollWheel(with: e) }
+        if scroll.scroll(e, width: bounds.width) { needsDisplay = true }
     }
 
     private func tabRect(_ i: Int) -> NSRect {
@@ -15000,15 +15085,17 @@ final class PlatinumTabStrip: NSView {
     private func closeBox(_ i: Int) -> NSRect {
         let r = tabRect(i)
         // Clear of the tab's slanted side.
-        return NSRect(x: r.minX + 12, y: 7, width: 10, height: 10)
+        return NSRect(x: r.minX + 12, y: r.minY + 7, width: 10, height: 10)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        Platinum.fill(bounds, Platinum.face)
-        // The top edge of the pane the editor sits in.
-        Platinum.fill(NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: 1), .black)
-        Platinum.fill(NSRect(x: 0, y: Self.tabH, width: bounds.width, height: 1), Platinum.tabBack)
         let active = window?.isKeyWindow ?? false
+        Platinum.fill(bounds, active ? Platinum.face : Self.inactiveBack)
+        // The top edge of the pane the editor sits in.
+        Platinum.fill(NSRect(x: 0, y: Self.gap + Self.tabH - 1, width: bounds.width, height: 1), .black)
+        Platinum.fill(NSRect(x: 0, y: Self.gap + Self.tabH, width: bounds.width, height: 1), Platinum.tabBack)
+        layoutTabs()
+        NSGraphicsContext.current?.cgContext.translateBy(x: -scroll.x, y: 0)
         for i in tabs.indices where i != focused { drawTab(i, active) }
         if focused >= 0 && focused < tabs.count { drawTab(focused, active) }
     }
@@ -15016,7 +15103,7 @@ final class PlatinumTabStrip: NSView {
     private func drawTab(_ i: Int, _ active: Bool) {
         let sel = i == focused
         let t = tabRect(i)
-        let label = Platinum.tab(t, selected: sel, tabH: Self.tabH)
+        let label = Platinum.tab(t, selected: sel, tabH: Self.tabH, back: Self.unselectedBack)
         let c = closeBox(i)
         if sel && active {
             Platinum.fill(c, closePressed ? Platinum.shadow : Platinum.face)
@@ -15032,8 +15119,7 @@ final class PlatinumTabStrip: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        let p = convert(event.locationInWindow, from: nil)
-        layoutTabs()
+        let p = local(event)
         // The selected tab is drawn on top: it wins where tabs overlap.
         let order = [focused] + tabs.indices.filter { $0 != focused }
         guard let i = order.first(where: { $0 >= 0 && $0 < tabs.count && tabRect($0).contains(p) })
@@ -15044,7 +15130,7 @@ final class PlatinumTabStrip: NSView {
             closePressed = true
             var inside = true
             while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-                inside = box.contains(convert(e.locationInWindow, from: nil))
+                inside = box.contains(local(e))
                 if e.type == .leftMouseUp { break }
                 closePressed = inside
             }

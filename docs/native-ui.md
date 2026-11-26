@@ -104,6 +104,12 @@ the bottom of `TurboKod.swift`):
 - The strip is shown only while `tk_desktop_native_ui` is 1 and at least one
   window is open.
 - A click calls `tk_desktop_tab_select` (= `window:focus:<i>`).
+- Every tab is as wide as its whole file name, never truncated; when they
+  don't all fit the strip scrolls (`TabStripScroll`, shared with
+  `PlatinumTabStrip`): the wheel on either axis scrolls it, and the focused
+  tab is scrolled into view when focus moves, a tab opens or closes, or the
+  strip is resized. The selected tab is raised out of a shaded band (white
+  in light mode, a light gray in dark).
 - The close button (on the left, where an unsaved tab shows a dot) and a
   middle-click call `tk_desktop_tab_close`. That goes through the same path
   as Cmd+W, so unsaved work raises the Cancel / Delete / Save sheet.

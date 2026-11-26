@@ -97,6 +97,7 @@ int64_t tk_desktop_vscroll_drag(int64_t h, int64_t mouse_y_milli);
 // Scroll the focused editor horizontally by `cols` columns (negative = left).
 // Used for a trackpad horizontal swipe / Shift+wheel. Returns 1 if it moved.
 int64_t tk_desktop_hscroll_by(int64_t h, int64_t cols, int64_t screen_cols, int64_t screen_rows);
+int64_t tk_desktop_tab_bar_hscroll(int64_t h, int64_t cols, int64_t x, int64_t y, int64_t screen_cols, int64_t screen_rows);
 int32_t tk_desktop_key(int64_t h, uint32_t key, uint8_t mods,
                        int64_t cols, int64_t rows);
 int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,

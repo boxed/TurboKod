@@ -21,6 +21,7 @@ from turbokod.file_io import (
     write_file
 )
 from turbokod.git_changes import parse_unified_diff_files
+from turbokod.tab_bar import TAB_BAR_CONSUMED, TabBar, TabBarItem
 from turbokod.local_changes import build_minimal_patch
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import replace_in_project
@@ -56,7 +57,7 @@ from turbokod.window import (
 from turbokod.events import (
     Event, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_NONE, EVENT_QUIT, EVENT_RESIZE,
     KEY_END, KEY_ENTER, KEY_ESC, KEY_F5, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META,
-    MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT
+    MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN
 )
 from turbokod.geometry import Point, Rect
 from turbokod.terminal import parse_input
@@ -1328,6 +1329,87 @@ def test_config_rewrite_in_the_same_second_at_the_same_size_is_noticed() raises:
     assert_true(win.config.sticky_scroll)
     win.shutdown()
     _ = delete_path(path)
+
+
+def _tab_items(n: Int) -> List[TabBarItem]:
+    var items = List[TabBarItem]()
+    for i in range(n):
+        items.append(TabBarItem(String("tab") + String(i), i, False))
+    return items^
+
+
+def _tab_hit(bar: TabBar, rect: Rect, idx: Int) -> Bool:
+    """Whether some cell of the strip hits window ``idx``."""
+    for x in range(rect.a.x, rect.b.x):
+        if bar.hit_test(Point(x, rect.a.y), rect) == idx:
+            return True
+    return False
+
+
+def test_tab_bar_scrolls_to_the_focused_tab() raises:
+    # Ten " tabN " tabs (6 cells + a gap each) on a 30-cell bar: four fit.
+    var c = Canvas(30, 1)
+    var rect = Rect(0, 0, 30, 1)
+    var bar = TabBar()
+    var items = _tab_items(10)
+    bar.paint(c, rect, items, 0)
+    assert_equal(bar.scroll, 0)
+    assert_equal(c.get(0, 0).glyph, String(" "))     # nothing to the left
+    assert_equal(c.get(29, 0).glyph, String("►"))    # more to the right
+    # Focusing the last tab scrolls it wholly into view.
+    bar.paint(c, rect, items, 9)
+    assert_true(bar.scroll > 0)
+    assert_equal(c.get(0, 0).glyph, String("◄"))
+    assert_equal(c.get(29, 0).glyph, String(" "))
+    assert_true(_tab_hit(bar, rect, 9))
+    assert_false(_tab_hit(bar, rect, 0))
+    var h = -1
+    for x in range(1, 29):
+        if bar.hit_test(Point(x, 0), rect) == 9:
+            h = x
+    assert_equal(h, 28)                               # its last cell, at the edge
+
+
+def test_tab_bar_wheel_and_arrows_scroll_until_focus_moves() raises:
+    var c = Canvas(30, 1)
+    var rect = Rect(0, 0, 30, 1)
+    var bar = TabBar()
+    var items = _tab_items(10)
+    bar.paint(c, rect, items, 0)
+    # A wheel turn over the bar scrolls it (and is the bar's own event).
+    var down = Event.mouse_event(Point(10, 0), MOUSE_WHEEL_DOWN, True, False)
+    assert_equal(bar.handle_mouse(down, rect), TAB_BAR_CONSUMED)
+    assert_equal(bar.scroll, 3)
+    # A repaint with the same focus keeps the user's scroll.
+    bar.paint(c, rect, items, 0)
+    assert_equal(bar.scroll, 3)
+    # The right arrow brings the next cut-off tab wholly into view.
+    var right = Event.mouse_event(Point(29, 0), MOUSE_BUTTON_LEFT, True, False)
+    assert_equal(bar.handle_mouse(right, rect), TAB_BAR_CONSUMED)
+    bar.paint(c, rect, items, 0)
+    assert_true(_tab_hit(bar, rect, 4))
+    for x in range(1, 29):
+        if bar.hit_test(Point(x, 0), rect) == 4:
+            assert_true(x < 29)
+    # Off the bar, the wheel isn't the bar's.
+    var elsewhere = Event.mouse_event(Point(10, 3), MOUSE_WHEEL_DOWN, True, False)
+    assert_equal(bar.handle_mouse(elsewhere, rect), -1)
+    # Moving focus to a tab scrolled away brings it back.
+    # Focusing a tab already in view doesn't scroll; one scrolled away
+    # is brought back.
+    var s = bar.scroll
+    bar.paint(c, rect, items, 2)
+    assert_equal(bar.scroll, s)
+    bar.paint(c, rect, items, 0)
+    assert_equal(bar.scroll, 0)
+    assert_true(_tab_hit(bar, rect, 0))
+    # Nothing scrolls when everything fits.
+    var wide = Canvas(200, 1)
+    var wrect = Rect(0, 0, 200, 1)
+    var wbar = TabBar()
+    wbar.paint(wide, wrect, items, 9)
+    assert_equal(wbar.scroll, 0)
+    assert_false(wbar.scroll_by(5))
 
 
 def main() raises:
