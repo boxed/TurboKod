@@ -21,7 +21,8 @@ come in 8×16 steps.
   [declarative-ui.md](declarative-ui.md)): Fill, the breakpoint dialogs,
   Project Settings and its action editor, Settings and its language editor.
   A modal dialog is a movable-modal child window centered over its window in
-  the upper third. Settings is a window of its own with a close box.
+  the upper third. Settings is a window of its own with a close box. (Frames
+  and spacing: "Following the Mac OS 8 HIG" below.)
 - **The confirm dialog** (`tk_desktop_native_dialog`, `kind: confirm`), as a
   Platinum alert with a Caution icon when a button is destructive, otherwise a
   Note icon. It has to be the host's: a confirm can be raised over a dialog
@@ -168,6 +169,46 @@ The standard normal button and the pressed default button were checked
 pixel for pixel against the 1× figure. The other states come from a
 1.5×-scaled figure, read with its doubled rows and columns undone. The
 dialog background is `E3`, as in those figures.
+
+## Following the Mac OS 8 HIG
+
+The rest of the controls and the layout follow the same document
+([Mac OS 8 Human Interface Guidelines, 1997](https://aresluna.org/ui-style-guides/Apple%20historic/Mac%20OS%208%20Human%20Interface%20Guidelines%20(1997).pdf)).
+Its figures are embedded as 1× bitmaps, so `pdfimages` gives exact pixels.
+
+- **Checkboxes** are pixel tables too (`PlatinumCheckArt`, Fig. 2-8: normal,
+  pressed and disabled, off and on), the checkmark running two points out
+  past the box. The control is 18 points tall, the box's foot 2 points
+  below the label's baseline, the label's ink 5 points after the box
+  (`Platinum.leadM` is a capital M's lead: the HIG aligns on it).
+- **Pop-up buttons** (`Platinum.popUp`, Fig. 2-6): rounded corners and a
+  22-point arrow box of their own with the up-and-down arrows.
+- **Tabs** (`Platinum.tab`, Fig. 2-30) are trapezoids, every tab standing on
+  the pane's edge; the selected one is the pane's `EF`, the others `CE`.
+  The main window's tab strip uses the same art.
+- **Edit text fields and lists** have a black line, the sunken bevel outside
+  it; with the keyboard, the bevel gives way to the focus ring, two points
+  of `6666CC` with the outer corners cut (`Platinum.fieldFrame`, Fig. 3-11).
+  A field's ring shows as soon as it holds the field editor, not at the
+  first keystroke (`PlatinumWindow.makeFirstResponder` redraws). A field
+  is 22 points tall, not counting the bevel.
+- **Frames** depend on the window (`PlatinumFrameView`): a window with a
+  close or zoom box (the project window, Settings, Find, the git view) has
+  the 6-point document frame, `CC` with the content sunk behind a black
+  line (Fig. 3-9, 5-3), and a modeless dialog's content raised a bevel
+  inside it (`raisedContent`); a movable modal dialog has a title bar over
+  a thin two-point bevel (Fig. 3-2); a dialog without a title bar has the
+  modal frame (Fig. 3-3), red when it is an alert — a tree holding an icon
+  (Fig. 3-5). Title-bar pinstripes are raised: white over `77`.
+- **Layout by visual edges.** The HIG measures between what you see: a
+  default ring doesn't count, nor does a field's bevel. A `PNode`'s
+  `outset` is what it draws past its visual edges; `fit` and `place` deal
+  in visual rects and the frame takes the outset around them. On that:
+  dialog margins 12, push buttons 12 apart and as wide as the widest in
+  the row (Fig. 3-18, 3-19), stacked fields and pop-ups 6 apart, a form
+  label 5 before its control, label-less checkboxes abutting at 18 points
+  (as the grid keeps them together), a tab pane padded like a group box
+  (12 top, 10 elsewhere), and an alert's icon at the top by its message.
 
 ## Scroll bars
 

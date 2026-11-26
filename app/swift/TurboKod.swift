@@ -12127,6 +12127,15 @@ enum Platinum {
     static let accent = NSColor(srgbRed: 0x33 / 255.0, green: 0x33 / 255.0, blue: 0x99 / 255.0, alpha: 1)
     static let lavender = NSColor(srgbRed: 0xCC / 255.0, green: 0xCC / 255.0, blue: 1, alpha: 1)
     static let lavenderDark = NSColor(srgbRed: 0x88 / 255.0, green: 0x88 / 255.0, blue: 0xCC / 255.0, alpha: 1)
+    /// A window frame's gray (its border and title bar), darker than the
+    /// content's `face`, and the frame's shadows: the Mac OS 8 Human
+    /// Interface Guidelines' window figures (3-2, 3-9).
+    static let frameFace = gray(0xCC)
+    static let frameShadow = gray(0x99)
+    /// The dark row of a title bar's pinstripes.
+    static let stripeDark = gray(0x77)
+    /// The keyboard focus ring round a field or a list (HIG 3-11, 2-25).
+    static let focus = rgb(0x6666CC)
 
     /// The system font. Silom's Latin glyphs are Chicago's, drawn on a
     /// 12-pixels-per-em grid, so at 12pt every stem lands on a whole point.
@@ -12187,10 +12196,28 @@ enum Platinum {
         fill(NSRect(x: r.maxX - 1, y: r.minY, width: 1, height: r.height), c)
     }
 
-    /// A sunken well: the Platinum frame of a text field or a list.
+    /// A sunken well: the Platinum frame of a text field or a list, a
+    /// bevel at `r`'s edge round a black line (HIG 2-25, 2-27).
     static func well(_ r: NSRect, active: Bool = true) {
         bevel(r, active ? shadow : face, active ? light : face)
-        outline(r.insetBy(dx: 1, dy: 1), active ? dark : disabled)
+        outline(r.insetBy(dx: 1, dy: 1), active ? black : disabled)
+    }
+
+    /// An edit text field's or a list box's frame round its black line
+    /// `r`: the sunken bevel outside it, or, while it has the keyboard, the
+    /// focus ring — two points of lavender, the outer corners cut (HIG
+    /// 3-11). Both reach two points past `r`.
+    static func fieldFrame(_ r: NSRect, focused: Bool, active: Bool) {
+        if active && focused {
+            let o = r.insetBy(dx: -2, dy: -2)
+            fill(NSRect(x: o.minX + 1, y: o.minY, width: o.width - 2, height: 2), focus)
+            fill(NSRect(x: o.minX + 1, y: o.maxY - 2, width: o.width - 2, height: 2), focus)
+            fill(NSRect(x: o.minX, y: o.minY + 1, width: 2, height: o.height - 2), focus)
+            fill(NSRect(x: o.maxX - 2, y: o.minY + 1, width: 2, height: o.height - 2), focus)
+        } else if active {
+            bevel(r.insetBy(dx: -1, dy: -1), shadow, light)
+        }
+        outline(r, active ? black : disabled)
     }
 
     /// Kerning off: Silom's kerning pairs aren't whole pixels and throw the
@@ -12309,7 +12336,7 @@ enum Platinum {
         let t = fitting(s, r.width, font)
         let (runs, w) = layout(t, font)
         let x = center ? floor(r.minX + (r.width - w) / 2) : floor(r.minX)
-        let base = floor(r.minY + (r.height - lineHeight(font)) / 2) + ceil(font.ascender)
+        let base = baseline(in: r, font)
         cg.saveGState()
         cg.setShouldAntialias(false)
         // The text matrix maps the glyph positions too, so the baseline goes
@@ -12322,6 +12349,22 @@ enum Platinum {
         }
         cg.restoreGState()
     }
+
+    /// Where `text` puts the baseline of a line centered in `r`.
+    static func baseline(in r: NSRect, _ font: NSFont = system) -> CGFloat {
+        floor(r.minY + (r.height - lineHeight(font)) / 2) + ceil(font.ascender)
+    }
+
+    /// The blank points before a capital M's ink in the system font. The
+    /// HIG aligns labels on a standard letter's ink (Fig. 3-14), so a label
+    /// meant to start `gap` points after a control starts this much sooner.
+    static let leadM: CGFloat = {
+        let f = system as CTFont
+        var ch: UniChar = 0x4D
+        var g: CGGlyph = 0
+        CTFontGetGlyphsForCharacters(f, &ch, &g, 1)
+        return CGFloat(max(0, ink(f, g)?.lo ?? 1))
+    }()
 
     /// `s` broken into lines no wider than `w`, at spaces and newlines.
     static func wrap(_ s: String, _ w: CGFloat, _ font: NSFont) -> [String] {
@@ -12346,21 +12389,22 @@ enum Platinum {
     }
 
     /// An active title bar's pinstripes between `a` and `z`, rows `top`
-    /// to `bottom`.
+    /// to `bottom`: raised ridges, a white row over a dark one a point to
+    /// the right (HIG 3-9).
     static func pinstripes(from a: CGFloat, to z: CGFloat, top: CGFloat, bottom: CGFloat) {
         guard z > a else { return }
         var y = top
         while y + 1 < bottom {
-            fill(NSRect(x: a, y: y, width: z - a, height: 1), shadow)
-            fill(NSRect(x: a + 1, y: y + 1, width: z - a, height: 1), light)
+            fill(NSRect(x: a, y: y, width: z - a, height: 1), light)
+            fill(NSRect(x: a + 1, y: y + 1, width: z - a, height: 1), stripeDark)
             y += 2
         }
     }
 
-    /// A title-bar box (12 points square) in its gap in the pinstripes:
-    /// `kind` 0 close, 1 zoom, 2 collapse.
-    static func titleBox(_ c: NSRect, _ kind: Int, pressed: Bool) {
-        fill(c.insetBy(dx: -2, dy: -2), face)
+    /// A title-bar box (12 points square) in its gap in the pinstripes,
+    /// over a bar of `ground`: `kind` 0 close, 1 zoom, 2 collapse.
+    static func titleBox(_ c: NSRect, _ kind: Int, pressed: Bool, ground: NSColor = face) {
+        fill(c.insetBy(dx: -2, dy: -2), ground)
         fill(c, pressed ? shadow : face)
         outline(c, dark)
         bevel(c.insetBy(dx: 1, dy: 1), pressed ? dark : light, pressed ? mid : shadow)
@@ -12392,29 +12436,132 @@ enum Platinum {
         ctx?.shouldAntialias = was
     }
 
-    /// One tab in a row `tabH` tall, over a pane whose top edge is at
-    /// `tabH - 1`: an unselected tab sits 2 lower and stops above that
-    /// edge, the selected one runs a point on over it to join the pane.
+    /// A tab pane's face, and an unselected tab's (HIG 2-30).
+    static let tabPane = gray(0xEF)
+    static let tabBack = gray(0xCE)
+
+    /// How far a tab's sides lean in, row by row from its top line to its
+    /// foot (HIG 2-30): a rounded top, then a point every three rows.
+    private static let tabSlant = [10, 8, 7, 6, 6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 1, 1, 1, 0]
+
+    /// One tab, `t` its foot's span, in a row `tabH` tall over a pane whose
+    /// top edge is at `tabH - 1`, pixel for pixel from the HIG's figure: a
+    /// trapezoid with a rounded top, lit down its left side and shaded
+    /// down its right. Every tab stands on the pane's edge; the selected
+    /// one is the pane's face and runs on through that edge to join it.
     /// Returns the rect for its label.
     static func tab(_ t: NSRect, selected sel: Bool, tabH: CGFloat) -> NSRect {
-        let r = NSRect(x: t.minX, y: t.minY, width: t.width, height: tabH - t.minY + (sel ? 1 : -1))
-        // The shape runs on past the tab's bottom to square off its lower
-        // corners; clip it there so a tab's fill stays in the tab row (the
-        // selected one a point further, over the pane's top edge it joins).
-        NSGraphicsContext.saveGraphicsState()
-        defer { NSGraphicsContext.restoreGraphicsState() }
-        NSBezierPath(rect: r).addClip()
-        NSGraphicsContext.current?.shouldAntialias = false
-        dark.setFill()
-        NSBezierPath(roundedRect: NSRect(x: r.minX, y: r.minY, width: r.width, height: r.height + 6),
-                     xRadius: 4, yRadius: 4).fill()
-        (sel ? face : mid).setFill()
-        NSBezierPath(roundedRect: NSRect(x: r.minX + 1, y: r.minY + 1, width: r.width - 2, height: r.height + 6),
-                     xRadius: 3, yRadius: 3).fill()
-        fill(NSRect(x: r.minX + 2, y: r.minY + 1, width: r.width - 5, height: 1), light)
-        fill(NSRect(x: r.minX + 1, y: r.minY + 2, width: 1, height: r.height - 2), light)
-        fill(NSRect(x: r.maxX - 2, y: r.minY + 2, width: 1, height: r.height - 2), shadow)
-        return NSRect(x: r.minX, y: r.minY + 1, width: r.width, height: tabH - 3)
+        let n = Int(tabH) - 1
+        let l0 = Int(t.minX), r0 = Int(t.maxX) - 1, top = Int(t.minY)
+        let faceV = sel ? 0xEF : 0xCE
+        func px(_ x: Int, _ y: Int, _ v: Int) {
+            fill(NSRect(x: CGFloat(x), y: CGFloat(y), width: 1, height: 1), gray(v))
+        }
+        func run(_ a: Int, _ b: Int, _ y: Int, _ v: Int) {
+            if b >= a { fill(NSRect(x: CGFloat(a), y: CGFloat(y), width: CGFloat(b - a + 1), height: 1), gray(v)) }
+        }
+        func slant(_ r: Int) -> Int { tabSlant[min(max(0, r + tabSlant.count - n), tabSlant.count - 1)] }
+        for r in 0..<n {
+            let lx = l0 + slant(r), rx = r0 - slant(r), y = top + r
+            let step = r > 0 && slant(r) < slant(r - 1)
+            switch r {
+            case 0:
+                px(lx, y, 0x21); run(lx + 1, rx, y, 0x00)
+            case 1:
+                px(lx, y, 0x21); px(lx + 1, y, 0x00); px(lx + 2, y, 0xBD)
+                run(lx + 3, rx - 3, y, 0xCE)
+                px(rx - 2, y, 0xBD); run(rx - 1, rx, y, 0x00)
+            case 2:
+                px(lx, y, 0x21); px(lx + 1, y, 0xBD); px(lx + 2, y, 0xCE)
+                run(lx + 3, rx - 3, y, 0xFF)
+                px(rx - 2, y, 0xDE); px(rx - 1, y, 0x8C); px(rx, y, 0x00)
+            default:
+                let left = step ? [0x21, 0xBD, 0xFF] : [0x00, 0xCE, 0xFF]
+                let right = step ? [0xBD, 0x42, 0x31] : [0xDE, 0x8C, 0x00]
+                // The fourth row still rounds the top corner.
+                let lit = r == 3 ? [0x21, 0xBD, 0xCE, 0xFF] : left
+                for (i, v) in lit.enumerated() { px(lx + i, y, v) }
+                run(lx + lit.count, rx - 3, y, faceV)
+                for (i, v) in right.enumerated() { px(rx - 2 + i, y, v) }
+            }
+        }
+        if sel {
+            // Through the pane's edge, and over the pane's own top bevel.
+            let y = top + n
+            px(l0 + 1, y, 0xCE); px(l0 + 2, y, 0xFF)
+            run(l0 + 3, r0 - 2, y, faceV)
+            px(r0 - 1, y, 0x8C)
+            run(l0 + 2, r0 - 2, y + 1, faceV)
+            run(l0 + 2, r0 - 2, y + 2, faceV)
+        }
+        return NSRect(x: t.minX, y: t.minY + 2, width: t.width, height: CGFloat(n - 2))
+    }
+
+    /// A tab control's pane (HIG 2-30): a black edge, two lit lines along
+    /// its top and left, one shaded line along its bottom and right.
+    static func tabPaneFrame(_ p: NSRect) {
+        fill(p, tabPane)
+        outline(p, black)
+        fill(NSRect(x: p.minX + 1, y: p.minY + 1, width: p.width - 2, height: 1), tabBack)
+        fill(NSRect(x: p.minX + 1, y: p.minY + 1, width: 1, height: p.height - 2), tabBack)
+        fill(NSRect(x: p.minX + 2, y: p.minY + 2, width: p.width - 4, height: 1), light)
+        fill(NSRect(x: p.minX + 2, y: p.minY + 2, width: 1, height: p.height - 4), light)
+        fill(NSRect(x: p.maxX - 2, y: p.minY + 2, width: 1, height: p.height - 3), gray(0x9C))
+        fill(NSRect(x: p.minX + 2, y: p.maxY - 2, width: p.width - 3, height: 1), gray(0x9C))
+    }
+
+    /// A pop-up menu button in `r`, pixel for pixel from the HIG's figure
+    /// (2-6): a raised face with rounded corners, and at its right a
+    /// 22-point box of its own holding the up-and-down arrows. Pressed, the
+    /// face darkens and loses its bevels; not `live`, it's a gray outline.
+    static func popUp(_ r: NSRect, pressed: Bool, live: Bool) {
+        let x0 = Int(r.minX), y0 = Int(r.minY), w = Int(r.width), h = Int(r.height)
+        guard w > 30, h > 12 else { return }
+        let sep = x0 + w - 22
+        func px(_ x: Int, _ y: Int, _ v: Int) {
+            fill(NSRect(x: CGFloat(x), y: CGFloat(y), width: 1, height: 1), gray(v))
+        }
+        func hrun(_ a: Int, _ b: Int, _ y: Int, _ v: Int) {
+            if b >= a { fill(NSRect(x: CGFloat(a), y: CGFloat(y), width: CGFloat(b - a + 1), height: 1), gray(v)) }
+        }
+        func vrun(_ x: Int, _ a: Int, _ b: Int, _ v: Int) {
+            if b >= a { fill(NSRect(x: CGFloat(x), y: CGFloat(a), width: 1, height: CGFloat(b - a + 1)), gray(v)) }
+        }
+        let xr = x0 + w - 1, yb = y0 + h - 1
+        fill(r.insetBy(dx: 1, dy: 1), gray(pressed ? 0xAA : 0xE3))
+        // The outline, two points cut off each corner.
+        let ink = live ? 0x00 : 0x99, soft = live ? 0x22 : 0x99
+        hrun(x0 + 3, xr - 3, y0, ink); hrun(x0 + 3, xr - 3, yb, ink)
+        vrun(x0, y0 + 3, yb - 3, ink); vrun(xr, y0 + 3, yb - 3, ink)
+        for (x, y) in [(x0 + 2, y0), (xr - 2, y0), (x0, y0 + 2), (xr, y0 + 2),
+                       (x0, yb - 2), (xr, yb - 2), (x0 + 2, yb), (xr - 2, yb)] { px(x, y, soft) }
+        for (x, y) in [(x0 + 1, y0 + 1), (xr - 1, y0 + 1), (x0 + 1, yb - 1), (xr - 1, yb - 1)] { px(x, y, ink) }
+        if live && !pressed {
+            // The face: lit along the top and left, shaded along the foot,
+            // and a dark line before the arrow box.
+            hrun(x0 + 2, sep - 1, y0 + 1, 0xFF)
+            vrun(x0 + 1, y0 + 2, yb - 2, 0xFF)
+            hrun(x0 + 2, sep, yb - 1, 0xAA)
+            vrun(sep, y0 + 2, yb - 2, 0xAA)
+            // The arrow box: its own bevel, two points of shade at the right.
+            hrun(sep + 2, xr - 3, y0 + 2, 0xFF)
+            vrun(sep + 2, y0 + 2, yb - 3, 0xFF)
+            px(xr - 2, y0 + 1, 0xBB); px(xr - 1, y0 + 2, 0xAA)
+            vrun(xr - 2, y0 + 3, yb - 3, 0xAA)
+            vrun(xr - 1, y0 + 3, yb - 2, 0x77)
+            hrun(sep + 3, xr - 3, yb - 2, 0xAA)
+            px(xr - 2, yb - 2, 0x77)
+            px(sep + 1, yb - 1, 0xBB)
+            hrun(sep + 2, xr - 2, yb - 1, 0x77)
+        } else if !live {
+            vrun(sep, y0 + 3, yb - 3, 0x99)
+        }
+        // The arrows: 1, 3, 5, 7 points wide, two rows apart.
+        let cx = sep + 10, a = y0 + (h - 10) / 2
+        for k in 0..<4 {
+            hrun(cx - k, cx + k, a + k, live ? 0x00 : 0x99)
+            hrun(cx - k, cx + k, a + 9 - k, live ? 0x00 : 0x99)
+        }
     }
 
     /// The thumb of the scroll bar `sb` over content scrolled to `pos` of
@@ -12623,12 +12770,22 @@ class PNode: NSView {
     /// The window's key state changed (`Platinum.activeChanged`).
     func activeChanged() {}
 
+    /// How far the node draws past its visual edges: a default button's
+    /// ring, a field's bevel and focus ring. Layout goes by visual edges,
+    /// as the HIG measures (a default ring "does not affect the base
+    /// resource size"; a field's height leaves out its bevel): `fit` is the
+    /// visual size, `place` gets the visual rect, and the frame is that
+    /// rect with the outset round it.
+    var outset: CGFloat { 0 }
+    /// The visual rect, in the node's own coordinates.
+    var vis: NSRect { bounds.insetBy(dx: outset, dy: outset) }
+
     func fit() -> NSSize { .zero }
     /// Takes no room and no gap in a stack (an empty label).
     var collapsed: Bool { false }
     var stretchX: Bool { false }
     var stretchY: Bool { false }
-    func place(_ r: NSRect) { frame = r }
+    func place(_ r: NSRect) { frame = r.insetBy(dx: -outset, dy: -outset) }
 
     /// Adopt the node's current values (the tree's shape is unchanged).
     func apply(_ n: [String: Any]) {
@@ -12696,20 +12853,41 @@ final class PStack: PNode {
     init(vertical: Bool) { self.vertical = vertical; super.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Between visual edges. Push buttons side by side are 12 apart (HIG
+    /// 3-19); anything clickable at least 4, better 6 to leave room for a
+    /// focus ring.
     private var gap: CGFloat {
         let n = node["n"] as? Int ?? 0
-        return vertical ? (n > 0 ? 12 : 4) : (n > 0 ? 12 : 8)
+        return vertical ? (n > 0 ? 12 : 6) : (n > 0 ? 12 : 8)
     }
     private var align: Int { flags & (UIFlag.CENTER | Platinum.RIGHT) }
 
     override var stretchX: Bool { vertical || align != 0 || kids.contains { $0.stretchX } }
     override var stretchY: Bool { kids.contains { $0.stretchY } }
+    /// Room for whatever a kid draws past its own visual edges.
+    override var outset: CGFloat { kids.map(\.outset).max() ?? 0 }
+
+    /// A click between the kids isn't the stack's.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let v = super.hitTest(point)
+        return v === self ? nil : v
+    }
 
     /// The kids that take room; a collapsed one is placed empty.
     private var shown: [PNode] { kids.filter { !$0.collapsed } }
 
+    /// A row of push buttons: all as wide as the widest (HIG 3-18: "make a
+    /// set of push buttons all the same size").
+    private var buttonRow: Bool { !vertical && shown.count > 1 && shown.allSatisfy { $0 is PButton } }
+
+    private func fits(_ kids: [PNode]) -> [NSSize] {
+        let fs = kids.map { $0.fit() }
+        guard buttonRow, let w = fs.map(\.width).max() else { return fs }
+        return fs.map { NSSize(width: w, height: $0.height) }
+    }
+
     override func fit() -> NSSize {
-        let fs = shown.map { $0.fit() }
+        let fs = fits(shown)
         let g = gap * CGFloat(max(0, fs.count - 1))
         if vertical {
             return NSSize(width: fs.map(\.width).max() ?? 0, height: fs.map(\.height).reduce(0, +) + g)
@@ -12718,10 +12896,11 @@ final class PStack: PNode {
     }
 
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
+        let o = outset
         for k in kids where k.collapsed { k.place(.zero) }
         let kids = shown
-        let fs = kids.map { $0.fit() }
+        let fs = fits(kids)
         let want = fit()
         if vertical {
             // Spare height goes to the spacers, else to the last stretchy kid.
@@ -12737,7 +12916,7 @@ final class PStack: PNode {
                     spare -= share
                 }
                 let w = k.stretchX ? r.width : min(fs[i].width, r.width)
-                k.place(NSRect(x: 0, y: y, width: w, height: h))
+                k.place(NSRect(x: o, y: o + y, width: w, height: h))
                 y += h + gap
             }
         } else {
@@ -12752,7 +12931,9 @@ final class PStack: PNode {
                 var w = fs[i].width
                 if stretchy.contains(i) { w += floor(spare / CGFloat(stretchy.count)) }
                 let h = k.stretchY ? r.height : fs[i].height
-                k.place(NSRect(x: x, y: floor((r.height - h) / 2), width: w, height: h))
+                // An alert's icon sits at the top, by its message (HIG 3-5).
+                let y = k is PIcon ? 0 : floor((r.height - h) / 2)
+                k.place(NSRect(x: o + x, y: o + y, width: w, height: h))
                 x += w + gap
             }
         }
@@ -12770,31 +12951,55 @@ final class PForm: PNode {
         return t.isEmpty ? "" : t + ":"
     }
     private var labelW: CGFloat { kids.indices.map { Platinum.width(label($0)) }.max() ?? 0 }
-    private var gap: CGFloat { (node["n"] as? Int ?? 0) > 0 ? 10 : 4 }
+    /// Between visual edges: stacked fields and pop-ups at least 6 apart
+    /// (HIG 3-25, 3-30).
+    private var gap: CGFloat { (node["n"] as? Int ?? 0) > 0 ? 10 : 6 }
     private static let row: CGFloat = 20
+    /// From a label to its control (HIG 3-33: 5 points).
+    private static let labelGap: CGFloat = 5
 
     override var stretchX: Bool { true }
     override var stretchY: Bool { kids.contains { $0.stretchY } }
+    override var outset: CGFloat { kids.map(\.outset).max() ?? 0 }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let v = super.hitTest(point)
+        return v === self ? nil : v
+    }
+
+    /// A checkbox labeling itself, with no form label.
+    private func bareCheck(_ i: Int) -> Bool { kids[i] is PCheck && label(i).isEmpty }
+
+    /// Above row `i`: the form's gap, except within a run of bare
+    /// checkboxes, whose 18-point rows abut (HIG 3-22) — as the grid keeps
+    /// such a run together (`_form_gap`).
+    private func gapAbove(_ i: Int) -> CGFloat {
+        i == 0 ? 0 : bareCheck(i - 1) && bareCheck(i) ? 0 : gap
+    }
+
+    private func rowHeight(_ i: Int, _ f: NSSize) -> CGFloat { bareCheck(i) ? f.height : max(f.height, Self.row) }
 
     override func fit() -> NSSize {
         let fs = kids.map { $0.fit() }
         let lw = labelW
-        let h = fs.map { max($0.height, Self.row) }.reduce(0, +) + gap * CGFloat(max(0, fs.count - 1))
-        return NSSize(width: (lw > 0 ? lw + 8 : 0) + (fs.map(\.width).max() ?? 0), height: h)
+        let h = fs.indices.map { rowHeight($0, fs[$0]) + gapAbove($0) }.reduce(0, +)
+        return NSSize(width: (lw > 0 ? lw + Self.labelGap : 0) + (fs.map(\.width).max() ?? 0), height: h)
     }
 
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
+        let o = outset
         let lw = labelW
-        let x0: CGFloat = lw > 0 ? lw + 8 : 0
+        let x0: CGFloat = lw > 0 ? lw + Self.labelGap : 0
         var y: CGFloat = 0
-        for k in kids {
+        for (i, k) in kids.enumerated() {
+            y += gapAbove(i)
             let f = k.fit()
-            let h = max(f.height, Self.row)
+            let h = rowHeight(i, f)
             let w = k.stretchX ? r.width - x0 : min(f.width, r.width - x0)
-            k.place(NSRect(x: x0, y: y + floor((h - f.height) / 2) * (f.height < Self.row ? 1 : 0),
+            k.place(NSRect(x: o + x0, y: o + y + floor((h - f.height) / 2) * (f.height < Self.row ? 1 : 0),
                            width: w, height: f.height))
-            y += h + gap
+            y += h
         }
     }
 
@@ -12808,13 +13013,15 @@ final class PForm: PNode {
 
     override func draw(_ dirtyRect: NSRect) {
         let lw = labelW
+        let o = outset
         for (i, k) in kids.enumerated() {
             let l = label(i)
             if l.isEmpty { continue }
             // Centered on the control's first line.
-            let line = NSRect(x: 0, y: k.frame.minY, width: lw, height: min(k.frame.height, 20))
+            let kv = k.frame.insetBy(dx: k.outset, dy: k.outset)
+            let line = NSRect(x: o, y: kv.minY, width: lw, height: min(kv.height, 22))
             let w = Platinum.width(l)
-            Platinum.text(l, in: NSRect(x: lw - w, y: line.minY, width: w + 1, height: line.height),
+            Platinum.text(l, in: NSRect(x: o + lw - w, y: line.minY, width: w + 1, height: line.height),
                           color: k.live ? .black : Platinum.disabled)
         }
     }
@@ -12866,10 +13073,13 @@ final class PButton: PNode {
     var onPress: (() -> Void)?
     var label: String { node["text"] as? String ?? "" }
     private var ring: CGFloat { has(UIFlag.DEFAULT) ? CGFloat(PlatinumButtonArt.ring) : 0 }
+    override var outset: CGFloat { ring }
 
+    /// 20 points tall, OK and Cancel's 58 wide at least, the title at
+    /// least 8 points from either end (HIG 3-16, 3-17); the default ring
+    /// is outside that.
     override func fit() -> NSSize {
-        NSSize(width: max(58, Platinum.width(label) + 24) + ring * 2,
-               height: CGFloat(PlatinumButtonArt.height) + ring * 2)
+        NSSize(width: max(58, Platinum.width(label) + 20), height: CGFloat(PlatinumButtonArt.height))
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -12907,28 +13117,22 @@ final class PCheck: PNode {
     private var on: Bool { (node["n"] as? Int ?? 0) != 0 }
     private var label: String { node["text"] as? String ?? "" }
 
-    override func fit() -> NSSize { NSSize(width: 12 + 6 + Platinum.width(label), height: 16) }
+    /// The label's origin: its ink 5 points after the 12-point box (HIG
+    /// 3-21).
+    private var labelX: CGFloat { 12 + 5 - Platinum.leadM }
+
+    /// 18 points tall, the clickable height (HIG 3-22).
+    override func fit() -> NSSize { NSSize(width: labelX + Platinum.width(label), height: 18) }
 
     override func draw(_ dirtyRect: NSRect) {
-        let box = NSRect(x: 0, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
-        Platinum.fill(box, pressed ? Platinum.disabled : Platinum.face)
-        Platinum.outline(box, live ? .black : Platinum.disabled)
-        if live {
-            Platinum.bevel(box.insetBy(dx: 1, dy: 1), pressed ? Platinum.shadow : Platinum.light,
-                           pressed ? Platinum.mid : Platinum.shadow)
-        }
-        if on {
-            let ctx = NSGraphicsContext.current
-            ctx?.shouldAntialias = false
-            let p = NSBezierPath()
-            p.move(to: NSPoint(x: box.minX + 2.5, y: box.minY + 5.5))
-            p.line(to: NSPoint(x: box.minX + 5, y: box.minY + 9))
-            p.line(to: NSPoint(x: box.minX + 11, y: box.minY - 1))
-            p.lineWidth = 2
-            (live ? NSColor.black : Platinum.disabled).setStroke()
-            p.stroke()
-        }
-        Platinum.text(label, in: NSRect(x: 18, y: 0, width: bounds.width - 18, height: bounds.height),
+        // The box's foot 2 points below the label's baseline (HIG 3-21).
+        let base = Platinum.baseline(in: bounds)
+        let art = on ? (!live ? PlatinumCheckArt.onDisabled : pressed ? PlatinumCheckArt.onPressed
+                                                               : PlatinumCheckArt.onNormal)
+                     : (!live ? PlatinumCheckArt.offDisabled : pressed ? PlatinumCheckArt.offPressed
+                                                                : PlatinumCheckArt.offNormal)
+        PlatinumButtonArt.paint(art, at: NSPoint(x: 0, y: base + 2 - 12))
+        Platinum.text(label, in: NSRect(x: labelX, y: 0, width: bounds.width - labelX, height: bounds.height),
                       color: live ? .black : Platinum.disabled)
     }
 
@@ -12954,16 +13158,9 @@ final class PPopup: PNode {
 
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds
-        Platinum.fill(r, pressed ? Platinum.disabled : Platinum.face)
-        Platinum.outline(r, live ? .black : Platinum.disabled)
-        if live { Platinum.bevel(r.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow) }
-        let arrow = NSRect(x: r.maxX - 20, y: r.minY, width: 20, height: r.height)
-        Platinum.fill(NSRect(x: arrow.minX, y: r.minY + 3, width: 1, height: r.height - 6), Platinum.shadow)
-        Platinum.fill(NSRect(x: arrow.minX + 1, y: r.minY + 3, width: 1, height: r.height - 6), Platinum.light)
-        Platinum.triangle(in: arrow.offsetBy(dx: 1, dy: 0), down: true,
-                          color: live ? .black : Platinum.disabled)
+        Platinum.popUp(r, pressed: pressed, live: live)
         let t = selected >= 0 && selected < options.count ? options[selected] : ""
-        Platinum.text(t, in: NSRect(x: 8, y: 0, width: arrow.minX - 10, height: r.height),
+        Platinum.text(t, in: NSRect(x: 8, y: 0, width: r.width - 22 - 10, height: r.height),
                       color: live ? .black : Platinum.disabled)
     }
 
@@ -12988,7 +13185,9 @@ final class PPopup: PNode {
 final class PText: PNode {
     let field = NSTextField(string: "")
     private var browse: PButton?
-    private var focused = false
+    /// Has the keyboard: the field editor is in it. The ring shows as soon
+    /// as the field takes the focus, not at the first keystroke (HIG 3-11).
+    private var focused: Bool { field.currentEditor() != nil }
 
     override var stretchX: Bool { (node["n"] as? Int ?? 0) == 0 }
 
@@ -13015,22 +13214,27 @@ final class PText: PNode {
 
     private var browseW: CGFloat { browse.map { $0.fit().width + 8 } ?? 0 }
 
+    /// The bevel outside the black line, and the focus ring a point past it.
+    override var outset: CGFloat { 2 }
+
+    /// The black line 22 points tall (HIG 3-30), the bevel outside it.
     override func fit() -> NSSize {
         let chars = node["n"] as? Int ?? 0
         return NSSize(width: (chars > 0 ? CGFloat(chars) * 7 + 12 : 240) + browseW, height: 22)
     }
 
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
         let well = wellRect
-        field.frame = NSRect(x: well.minX + 4, y: well.minY + 3, width: well.width - 8, height: well.height - 5)
+        field.frame = NSRect(x: well.minX + 3, y: well.minY + 3, width: well.width - 6, height: well.height - 5)
         if let b = browse {
             let w = b.fit().width
-            b.place(NSRect(x: r.width - w, y: 1, width: w, height: 20))
+            b.place(NSRect(x: vis.maxX - w, y: vis.minY + 1, width: w, height: 20))
         }
     }
 
-    private var wellRect: NSRect { NSRect(x: 0, y: 0, width: bounds.width - browseW, height: 22) }
+    /// The field's black line.
+    private var wellRect: NSRect { NSRect(x: vis.minX, y: vis.minY, width: vis.width - browseW, height: 22) }
 
     override func apply(_ n: [String: Any]) {
         node = n
@@ -13046,22 +13250,14 @@ final class PText: PNode {
         browse?.needsDisplay = true
     }
 
-    func setFocused(_ on: Bool) { focused = on; needsDisplay = true }
+    func setFocused(_ on: Bool) { needsDisplay = true }
 
     override func activeChanged() { field.textColor = live ? .black : Platinum.disabled }
 
     override func draw(_ dirtyRect: NSRect) {
         let r = wellRect
-        Platinum.fill(r.insetBy(dx: 2, dy: 2), enabled ? .white : Platinum.face)
-        if !Platinum.active(self) {
-            Platinum.well(r, active: false)
-        } else if focused {
-            // Platinum's focus ring: two points of lavender around the well.
-            Platinum.outline(r, Platinum.lavenderDark)
-            Platinum.outline(r.insetBy(dx: 1, dy: 1), Platinum.lavenderDark)
-        } else {
-            Platinum.well(r)
-        }
+        Platinum.fill(r.insetBy(dx: 1, dy: 1), enabled ? .white : Platinum.face)
+        Platinum.fieldFrame(r, focused: focused, active: live)
     }
 
     private func pickFile() {
@@ -13122,9 +13318,10 @@ final class PPreview: PNode {
         preview.wantsLayer = false
         addSubview(preview)
     }
+    override var outset: CGFloat { 1 }
     override func fit() -> NSSize { NSSize(width: 420, height: 150) }
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
         preview.frame = bounds.insetBy(dx: 2, dy: 2)
     }
     override func apply(_ n: [String: Any]) {
@@ -13141,7 +13338,8 @@ final class PPreview: PNode {
 /// Tab folders: the selected tab joins the raised pane below the row.
 final class PTabs: PNode {
     private static let tabH: CGFloat = 22
-    private static let pad = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+    /// Inside the pane, as inside a group box (HIG 3-29).
+    private static let pad = NSEdgeInsets(top: 12, left: 10, bottom: 10, right: 10)
     private var selected: Int { node["n"] as? Int ?? 0 }
     private var labels: [String] {
         (node["kids"] as? [[String: Any]] ?? []).map { $0["text"] as? String ?? "" }
@@ -13149,7 +13347,8 @@ final class PTabs: PNode {
     private var tabRects: [NSRect] {
         var x: CGFloat = 8
         return labels.map { l in
-            let w = Platinum.width(l) + 24
+            // The slanted sides take 10 points each at the top.
+            let w = Platinum.width(l) + 32
             defer { x += w - 1 }
             return NSRect(x: x, y: 0, width: w, height: Self.tabH)
         }
@@ -13165,7 +13364,7 @@ final class PTabs: PNode {
     }
 
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
         let inner = NSRect(x: Self.pad.left, y: Self.tabH + Self.pad.top,
                            width: r.width - Self.pad.left - Self.pad.right,
                            height: r.height - Self.tabH - Self.pad.top - Self.pad.bottom)
@@ -13184,10 +13383,9 @@ final class PTabs: PNode {
         let pane = NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: bounds.height - Self.tabH + 1)
         let active = Platinum.active(self)
         let ink: NSColor = active ? .black : Platinum.disabled
-        Platinum.outline(pane, Platinum.dark)
-        Platinum.bevel(pane.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+        Platinum.tabPaneFrame(pane)
         for (i, t) in tabRects.enumerated() where i != selected {
-            Platinum.text(labels[i], in: Platinum.tab(t.offsetBy(dx: 0, dy: 2), selected: false, tabH: Self.tabH),
+            Platinum.text(labels[i], in: Platinum.tab(t, selected: false, tabH: Self.tabH),
                           color: ink, center: true)
         }
         if selected < tabRects.count {
@@ -13225,17 +13423,21 @@ final class PList: PNode {
     override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
     override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
 
+    /// The bevel outside the black line, or the focus ring (HIG 2-25).
+    override var outset: CGFloat { 2 }
+
     override func fit() -> NSSize {
         let h = CGFloat(max(node["h"] as? Int ?? 6, 3))
-        return NSSize(width: 360, height: (showsHeader ? Self.headH : 0) + h * Self.rowH + 4)
+        return NSSize(width: 360, height: (showsHeader ? Self.headH : 0) + h * Self.rowH + 2)
     }
 
-    private var inner: NSRect { bounds.insetBy(dx: 2, dy: 2) }
+    /// Inside the black line.
+    private var inner: NSRect { bounds.insetBy(dx: 3, dy: 3) }
     private var rowsTop: CGFloat { inner.minY + (showsHeader ? Self.headH : 0) }
     /// From the height, not `inner`: before the first `place` the bounds
     /// are empty, and insetting an empty rect gives the infinite null rect.
     private var visible: Int {
-        let h = bounds.height - 4 - (showsHeader ? Self.headH : 0)
+        let h = bounds.height - 6 - (showsHeader ? Self.headH : 0)
         return max(1, Int(max(0, h) / Self.rowH))
     }
     private var maxTop: Int { max(0, rows.count - visible) }
@@ -13279,7 +13481,8 @@ final class PList: PNode {
     override func draw(_ dirtyRect: NSRect) {
         let active = Platinum.active(self)
         Platinum.fill(inner, .white)
-        Platinum.well(bounds, active: active)
+        Platinum.fieldFrame(bounds.insetBy(dx: 2, dy: 2), focused: window?.firstResponder === self,
+                            active: active)
         let widths = colWidths
         if showsHeader {
             var x = inner.minX
@@ -13446,8 +13649,10 @@ final class PListView: PNode {
         NSSize(width: 520, height: CGFloat(max(node["h"] as? Int ?? 8, 3)) * rows.rowH + 4)
     }
 
+    override var outset: CGFloat { 1 }
+
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
         rows.frame = bounds
         layoutColumns()
         revealMark()
@@ -13540,6 +13745,19 @@ final class PlatinumWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { document }
 
+    /// The focus ring follows the keyboard: redraw the fields and lists
+    /// whenever it moves (a click, Tab).
+    @discardableResult
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let ok = super.makeFirstResponder(responder)
+        func mark(_ v: NSView) {
+            if v is PText || v is PList { v.needsDisplay = true }
+            v.subviews.forEach(mark)
+        }
+        if let c = contentView { mark(c) }
+        return ok
+    }
+
     override func keyDown(with event: NSEvent) {
         if dialog?.handleKey(event) != true { super.keyDown(with: event) }
     }
@@ -13554,12 +13772,17 @@ final class PlatinumWindow: NSWindow {
 
 /// The window's frame and title bar, and the dialog body inside them.
 class PlatinumFrameView: NSView {
-    static let side: CGFloat = 6
     static let titleH: CGFloat = 22
     var title = "" { didSet { if title != oldValue { needsDisplay = true } } }
     /// A title bar (a movable modal dialog or a window); without one this
     /// is a plain modal frame (an alert).
     var titled = true
+    /// Without a title bar: an alert, whose frame is red (HIG 3-5), not a
+    /// modal dialog's gray (3-3).
+    var alert = false { didSet { if alert != oldValue { needsDisplay = true } } }
+    /// A modeless dialog's content: raised a bevel inside the frame's
+    /// black line (HIG 3-9, 3-12).
+    var raisedContent = false
     var closable = false
     /// A document window's zoom and collapse boxes, at the right.
     var zoomable = false
@@ -13575,10 +13798,16 @@ class PlatinumFrameView: NSView {
     private var pressedBox = -1 { didSet { needsDisplay = true } }
 
     override var isFlipped: Bool { true }
-    var topInset: CGFloat { titled ? Self.titleH : Self.side }
+    /// A window with a close or a zoom box (a document window, a modeless
+    /// dialog) has the wide frame round a black-lined content region (HIG
+    /// 3-9, 5-3); a movable modal dialog and an alert a thin one (3-2, 3-5).
+    var document: Bool { titled && (closable || zoomable) }
+    var side: CGFloat { document ? 6 : 3 }
+    /// A movable modal dialog's bevel runs under its title bar too.
+    var topInset: CGFloat { titled ? Self.titleH + (document ? 0 : 2) : side }
     var content: NSRect {
-        NSRect(x: Self.side, y: topInset, width: bounds.width - 2 * Self.side,
-               height: bounds.height - topInset - Self.side)
+        NSRect(x: side, y: topInset, width: bounds.width - 2 * side,
+               height: bounds.height - topInset - side)
     }
     private var closeBox: NSRect { NSRect(x: 9, y: 5, width: 12, height: 12) }
     private var collapseBox: NSRect { NSRect(x: bounds.width - 21, y: 5, width: 12, height: 12) }
@@ -13590,21 +13819,48 @@ class PlatinumFrameView: NSView {
             + (zoomable && collapsible ? [(2, collapseBox)] : [])
     }
 
+    private static func rgb(_ v: Int) -> NSColor {
+        NSColor(srgbRed: CGFloat(v >> 16) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+                blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
+    private static let alertLight = rgb(0xFDABA9), alertDark = rgb(0xFC7D78)
+
     override func draw(_ dirtyRect: NSRect) {
         let b = bounds
         let active = Platinum.active(self)
-        Platinum.fill(b, Platinum.face)
+        // The frame and title bar a darker gray than the content.
+        Platinum.fill(b, titled ? Platinum.frameFace : Platinum.face)
+        if !shaded { Platinum.fill(content, Platinum.face) }
         // An inactive window's frame is flat, in a gray outline.
         Platinum.outline(b, active ? .black : Platinum.shadow)
-        if active {
-            Platinum.bevel(b.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
-            // The content sits sunken in the frame.
-            if !shaded { Platinum.bevel(content.insetBy(dx: -1, dy: -1), Platinum.shadow, Platinum.light) }
+        if !active {
+            if document && !shaded { Platinum.outline(content.insetBy(dx: -1, dy: -1), Platinum.shadow) }
+        } else if document {
+            // Lit outside, then the content sunk into it behind a black
+            // line (HIG 3-9).
+            Platinum.bevel(b.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.frameShadow)
+            if !shaded {
+                Platinum.bevel(content.insetBy(dx: -2, dy: -2), Platinum.frameShadow, Platinum.light)
+                Platinum.outline(content.insetBy(dx: -1, dy: -1), .black)
+                if raisedContent { Platinum.bevel(content, Platinum.light, Platinum.shadow) }
+            }
+        } else if titled {
+            // A movable modal dialog: a title bar, a black line under it,
+            // and a two-point bevel round the content (HIG 3-2).
+            Platinum.bevel(NSRect(x: 1, y: 1, width: b.width - 2, height: Self.titleH - 2),
+                           Platinum.light, Platinum.frameShadow)
+            Platinum.fill(NSRect(x: 1, y: Self.titleH - 1, width: b.width - 2, height: 1), .black)
+            let f = NSRect(x: 1, y: Self.titleH, width: b.width - 2, height: b.height - Self.titleH - 1)
+            Platinum.bevel(f, Platinum.face, Platinum.dark)
+            Platinum.bevel(f.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.frameShadow)
+        } else {
+            // A modal dialog's frame; an alert's is red (HIG 3-3, 3-5).
+            let ring = b.insetBy(dx: 1, dy: 1)
+            Platinum.bevel(ring, alert ? Self.alertLight : Platinum.gray(0xC7),
+                           alert ? Self.alertDark : Platinum.gray(0x68))
+            Platinum.bevel(ring.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.gray(0xA9))
         }
-        guard titled else {
-            if active { Platinum.outline(b.insetBy(dx: 3, dy: 3), Platinum.mid) }
-            return
-        }
+        guard titled else { return }
         let tw = min(Platinum.width(title), max(0, b.width - 120))
         let tx = floor((b.width - tw) / 2)
         if active {
@@ -13614,7 +13870,9 @@ class PlatinumFrameView: NSView {
             for (a, z) in [(left, tx - 6), (tx + tw + 6, right)] {
                 Platinum.pinstripes(from: a, to: z, top: 5, bottom: Self.titleH - 4)
             }
-            for (i, c) in boxes { Platinum.titleBox(c, i, pressed: pressedBox == i) }
+            for (i, c) in boxes {
+                Platinum.titleBox(c, i, pressed: pressedBox == i, ground: Platinum.frameFace)
+            }
         }
         Platinum.text(title, in: NSRect(x: tx, y: 1, width: tw + 1, height: Self.titleH - 2),
                       color: active ? .black : Platinum.disabled)
@@ -14586,7 +14844,7 @@ final class PlatinumMainFrame: PlatinumFrameView {
 
     /// The window frame and the grid's size differ by this.
     var chrome: NSSize {
-        NSSize(width: 2 * Self.side, height: topInset + Self.side + (tabs.isHidden ? 0 : PlatinumTabStrip.height))
+        NSSize(width: 2 * side, height: topInset + side + (tabs.isHidden ? 0 : PlatinumTabStrip.height))
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) { layoutChrome() }
@@ -14723,7 +14981,7 @@ final class PlatinumTabStrip: NSView {
     private func layoutTabs() {
         guard layoutWidth != bounds.width else { return }
         layoutWidth = bounds.width
-        let natural = tabs.map { min(Self.maxTabW, max(Self.minTabW, Platinum.width($0.title) + Self.slot + 24)) }
+        let natural = tabs.map { min(Self.maxTabW, max(Self.minTabW, Platinum.width($0.title) + Self.slot + 30)) }
         let avail = bounds.width - 16 + CGFloat(max(0, tabs.count - 1))
         let widths = fitTabWidths(natural, avail: avail, minW: Self.minTabW, whole: true)
         var x: CGFloat = 8
@@ -14741,14 +14999,15 @@ final class PlatinumTabStrip: NSView {
 
     private func closeBox(_ i: Int) -> NSRect {
         let r = tabRect(i)
-        return NSRect(x: r.minX + 9, y: 6, width: 10, height: 10)
+        // Clear of the tab's slanted side.
+        return NSRect(x: r.minX + 12, y: 7, width: 10, height: 10)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         Platinum.fill(bounds, Platinum.face)
         // The top edge of the pane the editor sits in.
-        Platinum.fill(NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: 1), Platinum.dark)
-        Platinum.fill(NSRect(x: 0, y: Self.tabH, width: bounds.width, height: 1), Platinum.light)
+        Platinum.fill(NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: 1), .black)
+        Platinum.fill(NSRect(x: 0, y: Self.tabH, width: bounds.width, height: 1), Platinum.tabBack)
         let active = window?.isKeyWindow ?? false
         for i in tabs.indices where i != focused { drawTab(i, active) }
         if focused >= 0 && focused < tabs.count { drawTab(focused, active) }
@@ -14757,8 +15016,8 @@ final class PlatinumTabStrip: NSView {
     private func drawTab(_ i: Int, _ active: Bool) {
         let sel = i == focused
         let t = tabRect(i)
-        let label = Platinum.tab(sel ? t : t.offsetBy(dx: 0, dy: 2), selected: sel, tabH: Self.tabH)
-        let c = closeBox(i).offsetBy(dx: 0, dy: sel ? 0 : 1)
+        let label = Platinum.tab(t, selected: sel, tabH: Self.tabH)
+        let c = closeBox(i)
         if sel && active {
             Platinum.fill(c, closePressed ? Platinum.shadow : Platinum.face)
             Platinum.outline(c, Platinum.dark)
@@ -14908,7 +15167,10 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     /// Where the answers go instead of `tk_desktop_ui_event` (the confirm
     /// alert answers `tk_desktop_native_confirm_answer`).
     private let onEvents: (([[Any]]) -> Void)?
-    private static let margin = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+    /// From the content's edge to the controls' visual edges: push buttons
+    /// 12 points from the edges (HIG 3-19), and the same all round for a
+    /// balanced box.
+    private static let margin = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
     var onAction: ((Int32) -> Void)?
     /// A picker (`LARGE`): most of its window rather than its natural size.
     private var large = false
@@ -14936,6 +15198,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         win.backgroundColor = Platinum.face
         frameView.titled = titled
         frameView.closable = asWindow
+        frameView.raisedContent = asWindow
         frameView.onClose = { [weak self] in self?.cancel() }
         win.contentView = frameView
         keyObservers = Platinum.observeKeyState(of: win) { [weak self] in
@@ -15009,6 +15272,9 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         lastTree = nd
         frameView.title = tree["text"] as? String ?? ""
         win.title = frameView.title   // drawn by the frame; kept for the Window list
+        // An alert is an icon, text and buttons (HIG "Alert Boxes"); a
+        // prompt with a field is a modal dialog.
+        frameView.alert = Self.hasIcon(tree)
         cancelKey = tree["key"] as? String ?? ""
         large = ((tree["f"] as? Int ?? 0) & UIFlag.LARGE) != 0
         let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
@@ -15029,6 +15295,10 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         return true
     }
 
+    private static func hasIcon(_ n: [String: Any]) -> Bool {
+        (n["k"] as? String) == "icon" || (n["kids"] as? [[String: Any]] ?? []).contains(where: hasIcon)
+    }
+
     /// Size the window to the body and place everything; a dialog keeps
     /// its top edge where it is.
     private func relayout() {
@@ -15041,8 +15311,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
             cw = max(cw, floor(pf.width * 0.8))
             ch = max(ch, floor(pf.height * 0.8))
         }
-        let size = NSSize(width: cw + 2 * PlatinumFrameView.side,
-                          height: ch + frameView.topInset + PlatinumFrameView.side)
+        let size = NSSize(width: cw + 2 * frameView.side,
+                          height: ch + frameView.topInset + frameView.side)
         if win.frame.size != size {
             let top = win.frame.maxY
             var f = win.frame
@@ -15196,8 +15466,10 @@ final class PTextArea: PNode, NSTextViewDelegate {
         NSSize(width: 440, height: CGFloat(max(node["h"] as? Int ?? 6, 2)) * 16 + 8)
     }
 
+    override var outset: CGFloat { 1 }
+
     override func place(_ r: NSRect) {
-        frame = r
+        super.place(r)
         scroll.frame = bounds.insetBy(dx: 5, dy: 4)
         text.frame.size.width = scroll.contentSize.width
         if !enabled { text.scrollToEndOfDocument(nil) }
@@ -15719,7 +15991,7 @@ final class PlatinumGitView: GitViewBase, GitSurface {
             let w = btn.fit().width
             x -= w
             btn.place(NSRect(x: x, y: b.height - m - 20, width: w, height: 20))
-            x -= 8
+            x -= 12   // push buttons side by side (HIG 3-19)
         }
         body.needsDisplay = true
     }
@@ -16377,4 +16649,96 @@ enum PlatinumButtonArt {
             }
         }
     }
+}
+
+/// Checkboxes, pixel for pixel from the Mac OS 8 Human Interface
+/// Guidelines (Fig. 2-8), the dialog gray (DD there) as this look's face:
+/// 12 points square, the checkmark running two points out past the box's
+/// top right. `PlatinumButtonArt.paint` draws them.
+enum PlatinumCheckArt {
+    private static let T = -1
+    static let offNormal: [[Int]] = [
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T],
+        [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE3, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xE3, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x00, T, T],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T]
+    ]
+    static let offPressed: [[Int]] = [
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T],
+        [0x00, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x77, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x77, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x00, T, T],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T]
+    ]
+    static let offDisabled: [[Int]] = [
+        [0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, T, T]
+    ]
+    static let onPressed: [[Int]] = [
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T],
+        [0x00, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x77, 0x00, 0x00, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x00, 0x00, 0x55, 0x77],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x00, 0x00, 0x00, 0x77, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x00, 0x00, 0x44, 0x00, T, T],
+        [0x00, 0x55, 0x00, 0x00, 0x77, 0x77, 0x77, 0x00, 0x00, 0x44, 0x55, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x00, 0x00, 0x77, 0x00, 0x00, 0x44, 0x55, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x55, 0x00, 0x00, 0x00, 0x44, 0x55, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x55, 0x00, 0x44, 0x55, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x55, 0x77, 0x77, 0x77, 0x44, 0x55, 0x77, 0x77, 0x77, 0x99, 0x00, T, T],
+        [0x00, 0x77, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x00, T, T],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T]
+    ]
+    static let onNormal: [[Int]] = [
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T],
+        [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE3, 0x00, 0x00, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x00, 0x00, 0x77, 0xAA],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x00, 0x00, 0x00, 0xAA, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x00, 0x00, 0x55, 0x00, T, T],
+        [0x00, 0xFF, 0x00, 0x00, 0xE3, 0xE3, 0xE3, 0x00, 0x00, 0x77, 0x77, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0x00, 0x00, 0xE3, 0x00, 0x00, 0x77, 0xAA, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xAA, 0x00, 0x00, 0x00, 0x77, 0xAA, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xAA, 0x00, 0x77, 0xAA, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xFF, 0xE3, 0xE3, 0xE3, 0x77, 0xAA, 0xE3, 0xE3, 0xE3, 0x88, 0x00, T, T],
+        [0x00, 0xE3, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x00, T, T],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, T, T]
+    ]
+    static let onDisabled: [[Int]] = [
+        [0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x88, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x88, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0x88, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0x88, 0x88, 0xE3, 0xE3, 0xE3, 0x88, 0x88, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0x88, 0x88, 0xE3, 0x88, 0x88, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0x88, 0x88, 0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0x88, T, T],
+        [0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, T, T]
+    ]
 }
