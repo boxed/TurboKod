@@ -53,7 +53,7 @@ gutter). A 3-way merge over such a block comes out a conflict, never a
 wrong merge."""
 
 
-def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
+def diff_lines(a: Span[String, _], b: Span[String, _]) -> List[DiffOp]:
     """Myers diff over two line lists. Returns the edit script in
     forward (input-order) form: a sequence of equal / delete / insert
     operations whose application turns ``a`` into ``b``.
@@ -82,7 +82,8 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
 
 
 def _myers(
-    a: List[String], b: List[String], a_lo: Int, a_hi: Int, b_lo: Int, b_hi: Int,
+    a: Span[String, _], b: Span[String, _], a_lo: Int, a_hi: Int, b_lo: Int,
+    b_hi: Int,
 ) -> List[DiffOp]:
     """The edit script for ``a[a_lo:a_hi]`` to ``b[b_lo:b_hi]``, with
     indices into ``a`` and ``b``."""
@@ -381,8 +382,8 @@ def _line_similarity(a: String, b: String) -> Float64:
     return Float64(common) / Float64(denom)
 
 
-# Above this rem×add product we skip the O(n²) best-match search and fall back
-# to positional pairing — change runs that large are rare and not worth the cost.
+# Above this rem×add product we skip the O(n²) best-match search and align the
+# run on its indent-stripped lines instead (``_pair_by_alignment``).
 comptime _EMPHASIS_MATCH_BUDGET: Int = 400
 
 # Don't pair a removed row with an added row below this content similarity
@@ -422,58 +423,111 @@ def diff_row_partner(rows: List[DiffRow]) -> List[Int]:
             else:
                 add_idx.append(j)
             j += 1
-        var n_pairs = len(rem_idx) if len(rem_idx) < len(add_idx) else len(add_idx)
         # Default to similarity-based matching so an inserted comment above a
-        # modified line doesn't pair the code with the comment; fall back to
-        # positional for huge runs (the O(n²) search isn't worth it there).
+        # modified line doesn't pair the code with the comment. A run too big
+        # for the O(n²) search is aligned on its indent-stripped lines first.
         if len(rem_idx) * len(add_idx) > _EMPHASIS_MATCH_BUDGET:
-            for k in range(n_pairs):
-                partner[rem_idx[k]] = add_idx[k]
-                partner[add_idx[k]] = rem_idx[k]
+            _pair_by_alignment(rows, rem_idx, add_idx, partner)
         else:
-            var used_add = List[Bool]()
-            for _ in range(len(add_idx)):
-                used_add.append(False)
-            var used_rem = List[Bool]()
-            for _ in range(len(rem_idx)):
-                used_rem.append(False)
-            # Score every pair once; the greedy picks below only read the
-            # table (each score is a character-level diff of two lines).
-            var n_add = len(add_idx)
-            var sims = List[Float64](capacity=len(rem_idx) * n_add)
-            for ri in range(len(rem_idx)):
-                for ai in range(n_add):
-                    sims.append(_line_similarity(
-                        rows[rem_idx[ri]].text, rows[add_idx[ai]].text
-                    ))
-            for _ in range(n_pairs):
-                var best = -1.0
-                var best_r = -1
-                var best_a = -1
-                for ri in range(len(rem_idx)):
-                    if used_rem[ri]:
-                        continue
-                    for ai in range(n_add):
-                        if used_add[ai]:
-                            continue
-                        var sim = sims[ri * n_add + ai]
-                        if sim > best:
-                            best = sim
-                            best_r = ri
-                            best_a = ai
-                if best_r < 0:
-                    break
-                # The best remaining pair is too dissimilar to be one line
-                # modified — and every later pair would be worse, so stop.
-                # Leaving them unmatched groups them as removed-then-added.
-                if best < _PARTNER_MIN_SIMILARITY:
-                    break
-                used_rem[best_r] = True
-                used_add[best_a] = True
-                partner[rem_idx[best_r]] = add_idx[best_a]
-                partner[add_idx[best_a]] = rem_idx[best_r]
+            _pair_by_similarity(rows, rem_idx, add_idx, partner)
         i = j
     return partner^
+
+
+def _pair_by_alignment(
+    rows: List[DiffRow], rem_idx: List[Int], add_idx: List[Int],
+    mut partner: List[Int],
+):
+    """Pair a change run too big for ``_pair_by_similarity``: a line diff of
+    the two sides with leading whitespace stripped pairs the lines that only
+    changed indentation (a block moved in or out a level), and each gap
+    between those anchors small enough is paired by similarity. The rest stays
+    unmatched — never paired by position, which put every removed line above
+    an unrelated added one and zigzagged the whole block."""
+    var rem_text = List[String](capacity=len(rem_idx))
+    for k in range(len(rem_idx)):
+        rem_text.append(_lstrip_ws(rows[rem_idx[k]].text))
+    var add_text = List[String](capacity=len(add_idx))
+    for k in range(len(add_idx)):
+        add_text.append(_lstrip_ws(rows[add_idx[k]].text))
+    var ops = diff_lines(rem_text, add_text)
+    var r0 = 0
+    var a0 = 0
+    var r = 0
+    var a = 0
+    for k in range(len(ops) + 1):
+        var at_end = k == len(ops)
+        if not at_end and ops[k].kind == OP_DELETE:
+            r += 1
+            continue
+        if not at_end and ops[k].kind == OP_INSERT:
+            a += 1
+            continue
+        # An anchor (or the end) closes the gap [r0, r) x [a0, a).
+        if (r - r0) > 0 and (a - a0) > 0 \
+                and (r - r0) * (a - a0) <= _EMPHASIS_MATCH_BUDGET:
+            _pair_by_similarity(
+                rows, rem_idx[r0:r], add_idx[a0:a], partner,
+            )
+        if at_end:
+            break
+        partner[rem_idx[r]] = add_idx[a]
+        partner[add_idx[a]] = rem_idx[r]
+        r += 1
+        a += 1
+        r0 = r
+        a0 = a
+
+
+def _pair_by_similarity(
+    rows: List[DiffRow], rem_idx: Span[Int, _], add_idx: Span[Int, _],
+    mut partner: List[Int],
+):
+    """Greedily pair each removed row in ``rem_idx`` with the most similar
+    added row in ``add_idx``, best pair first, down to
+    ``_PARTNER_MIN_SIMILARITY``."""
+    var n_pairs = len(rem_idx) if len(rem_idx) < len(add_idx) else len(add_idx)
+    var used_add = List[Bool]()
+    for _ in range(len(add_idx)):
+        used_add.append(False)
+    var used_rem = List[Bool]()
+    for _ in range(len(rem_idx)):
+        used_rem.append(False)
+    # Score every pair once; the greedy picks below only read the
+    # table (each score is a character-level diff of two lines).
+    var n_add = len(add_idx)
+    var sims = List[Float64](capacity=len(rem_idx) * n_add)
+    for ri in range(len(rem_idx)):
+        for ai in range(n_add):
+            sims.append(_line_similarity(
+                rows[rem_idx[ri]].text, rows[add_idx[ai]].text
+            ))
+    for _ in range(n_pairs):
+        var best = -1.0
+        var best_r = -1
+        var best_a = -1
+        for ri in range(len(rem_idx)):
+            if used_rem[ri]:
+                continue
+            for ai in range(n_add):
+                if used_add[ai]:
+                    continue
+                var sim = sims[ri * n_add + ai]
+                if sim > best:
+                    best = sim
+                    best_r = ri
+                    best_a = ai
+        if best_r < 0:
+            break
+        # The best remaining pair is too dissimilar to be one line
+        # modified — and every later pair would be worse, so stop.
+        # Leaving them unmatched groups them as removed-then-added.
+        if best < _PARTNER_MIN_SIMILARITY:
+            break
+        used_rem[best_r] = True
+        used_add[best_a] = True
+        partner[rem_idx[best_r]] = add_idx[best_a]
+        partner[add_idx[best_a]] = rem_idx[best_r]
 
 
 def diff_row_emphasis(rows: List[DiffRow]) -> List[List[Tuple[Int, Int]]]:

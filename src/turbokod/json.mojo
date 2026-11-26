@@ -319,7 +319,7 @@ def json_get_string_array(obj: JsonValue, key: String) -> List[String]:
     return out^
 
 
-def json_string_array(items: List[String]) -> JsonValue:
+def json_string_array(items: Span[String, _]) -> JsonValue:
     """``items`` as a JSON array of strings — the inverse of
     ``json_get_string_array``."""
     var arr = json_array()

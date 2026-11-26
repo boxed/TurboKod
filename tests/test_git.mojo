@@ -1960,6 +1960,92 @@ def test_diff_row_partner_skips_dissimilar_in_restructure() raises:
     assert_equal(partner[3], -1)
 
 
+def test_diff_row_partner_big_run_pairs_reindented_lines() raises:
+    """A change run too big for the similarity search (here 30 removed x 21
+    added) used to be paired by position, so every removed row was placed
+    above an unrelated added one and the review editor showed the block as a
+    remove/add zigzag. Now the lines that only lost an indent level pair with
+    their new selves, and the rest stays unmatched, removed-then-added.
+
+    Mirrors a ``with transaction.atomic():`` block unwrapped in dryft."""
+    var before = split_lines_no_trailing(String(
+        "        with transaction.atomic():\n"
+        "            session = (\n"
+        "                ChatSession.objects.only(\n"
+        "                    'session_id',\n"
+        "                    'run_started_at',\n"
+        "                    'agent_kind',\n"
+        "                    'project_id',\n"
+        "                )\n"
+        "                .filter(pk=session_pk)\n"
+        "                .first()\n"
+        "            )\n"
+        "            if session is None or session.run_started_at >= cutoff:\n"
+        "                continue\n"
+        "\n"
+        "            logger.error(\n"
+        "                'chat turn remained open after its timeout',\n"
+        "                extra={\n"
+        "                    'stalled_chat_turn': {\n"
+        "                        'session_id': str(session.session_id),\n"
+        "                        'session_pk': session.pk,\n"
+        "                        'run_started_at': session.run_started_at,\n"
+        "                        'agent_kind': session.agent_kind,\n"
+        "                        'conversation_type': session.conversation_type,\n"
+        "                        'project_pk': session.project_id,\n"
+        "                    }\n"
+        "                },\n"
+        "            )\n"
+        "            session.stalled_run_reported_started_at = session.run_started_at\n"
+        "            session.save(update_fields=['stalled_run_reported_started_at'])\n"
+        "            reported += 1\n"
+    ))
+    var after = split_lines_no_trailing(String(
+        "        session = ChatSession.objects.only('session_id', 'project_id',\n"
+        "        ).filter(pk=session_pk).first()\n"
+        "        if session is None or session.run_started_at >= cutoff:\n"
+        "            continue\n"
+        "        # Only if the marker is still the one read.\n"
+        "        is_cleared = ChatSession.objects.filter(pk=session.pk).update(run_started_at=None)\n"
+        "        if not is_cleared:\n"
+        "            continue\n"
+        "        logger.error(\n"
+        "            'chat turn remained open after its timeout',\n"
+        "            extra={\n"
+        "                'stalled_chat_turn': {\n"
+        "                    'session_id': str(session.session_id),\n"
+        "                    'session_pk': session.pk,\n"
+        "                    'run_started_at': session.run_started_at,\n"
+        "                    'agent_kind': session.agent_kind,\n"
+        "                    'conversation_type': session.conversation_type,\n"
+        "                    'project_pk': session.project_id,\n"
+        "                }\n"
+        "            },\n"
+        "        )\n"
+        "        reported += 1\n"
+    ))
+    var rows = build_diff_rows(before, after)
+    # No line is unchanged: one run, all removed rows then all added rows.
+    var n_rem = len(before)
+    assert_equal(len(rows), n_rem + len(after))
+    assert_true(n_rem * len(after) > 400)
+    var partner = diff_row_partner(rows)
+    # The re-indented ``logger.error(...)`` block pairs line for line.
+    for k in range(13):
+        assert_equal(partner[14 + k], n_rem + 8 + k)
+        assert_equal(partner[n_rem + 8 + k], 14 + k)
+    assert_equal(partner[29], n_rem + 21)       # reported += 1
+    # So does the re-indented ``if``, and within the gap above it the
+    # ``.filter(...)`` line by similarity.
+    assert_equal(partner[11], n_rem + 2)
+    assert_equal(partner[8], n_rem + 1)
+    # Lines with no counterpart are never paired.
+    assert_equal(partner[0], -1)                # with transaction.atomic():
+    assert_equal(partner[27], -1)               # session.stalled_... = ...
+    assert_equal(partner[28], -1)               # session.save(...)
+    assert_equal(partner[n_rem + 5], -1)        # is_cleared = ...
+
+
 def test_diff_view_intraline_emphasis_render() raises:
     """The rendered diff emphasises the changed characters: a stronger green
     on the new line's changed bytes and a stronger red on the old (phantom)

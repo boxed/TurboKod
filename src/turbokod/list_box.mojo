@@ -125,8 +125,8 @@ def list_row_attr(selected: Bool, focused: Bool, body_attr: Attr) -> Attr:
 
 
 def paint_list_rows_marked(
-    mut canvas: Canvas, painter: Painter, bounds: Rect, rows: List[String],
-    marks: List[Bool], caret_row: Int, anchor_row: Int, focused: Bool,
+    mut canvas: Canvas, painter: Painter, bounds: Rect,
+    rows: Span[String, _], marks: List[Bool], caret_row: Int, anchor_row: Int, focused: Bool,
     body_attr: Attr, indent: Int = 1,
 ):
     """Like ``paint_list_rows`` for a multi-selection: ``marks[r]`` says
@@ -426,7 +426,7 @@ struct ListBox(Copyable, Movable):
         mut self,
         mut canvas: Canvas,
         bounds: Rect,
-        rows: List[String],
+        rows: Span[String, _],
         focused: Bool,
         body_attr: Attr,
     ):
@@ -480,10 +480,8 @@ struct ListBox(Copyable, Movable):
         """
         var visible = bounds.height()
         var first = self.prepare(bounds, len(items))
-        var rows = List[String]()
-        for idx in range(first, min(first + max(visible, 0), len(items))):
-            rows.append(items[idx])
-        self.paint_rows(canvas, bounds, rows, focused, body_attr)
+        var end = min(first + max(visible, 0), len(items))
+        self.paint_rows(canvas, bounds, items[first:end], focused, body_attr)
 
     def paint_empty_hint(
         self,

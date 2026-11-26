@@ -277,7 +277,7 @@ def launch_arguments_for(
     """
     var body: JsonValue
     if spec.name == String("debugpy"):
-        body = _launch_args_debugpy(program, cwd, args^, stop_on_entry)
+        body = _launch_args_debugpy(program, cwd, args, stop_on_entry)
     elif spec.name == String("lldb-dap"):
         body = _launch_args_lldb(program, cwd, args^, stop_on_entry)
     elif spec.name == String("delve"):
@@ -293,7 +293,7 @@ def launch_arguments_for(
 
 
 def _launch_args_debugpy(
-    program: String, cwd: String, var args: List[String],
+    program: String, cwd: String, args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
     """``debugpy``: ``program``-or-``module`` + ``args`` + ``cwd`` +
@@ -343,10 +343,13 @@ def _launch_args_debugpy(
     """
     var module_name = String("")
     var script_program = String("")
+    # The args debugpy forwards to the program: those after the module or
+    # script it was told to run.
+    var first_arg = 0
     if _is_python_interpreter(program) and len(args) >= 1:
         if args[0] == String("-m") and len(args) >= 2:
             module_name = args[1]
-            args = _drop_front(args, 2)
+            first_arg = 2
         elif not _starts_with_dash(args[0]):
             # ``python script.py [args...]`` → debug ``script.py`` with
             # the residual args as its argv. Skipped when ``args[0]``
@@ -355,7 +358,7 @@ def _launch_args_debugpy(
             # better to forward the unrewritten args and let debugpy
             # error explicitly than to silently drop a flag.
             script_program = args[0]
-            args = _drop_front(args, 1)
+            first_arg = 1
     var o = json_object()
     if len(module_name.as_bytes()) > 0:
         o.put(String("module"), json_str(module_name))
@@ -364,19 +367,13 @@ def _launch_args_debugpy(
     else:
         o.put(String("program"), json_str(program))
     o.put(String("cwd"), json_str(cwd))
-    o.put(String("args"), json_string_array(args))
+    o.put(String("args"), json_string_array(args[first_arg:]))
     o.put(String("console"), json_str(String("internalConsole")))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
     o.put(String("justMyCode"), json_bool(False))
     o.put(String("subProcess"), json_bool(True))
     return o^
 
-
-def _drop_front(args: List[String], n: Int) -> List[String]:
-    var rest = List[String]()
-    for i in range(n, len(args)):
-        rest.append(args[i])
-    return rest^
 
 
 def _starts_with_dash(s: String) -> Bool:

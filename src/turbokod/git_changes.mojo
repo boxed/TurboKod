@@ -466,15 +466,12 @@ def diff_buffer_marks(
         tail += 1
     if lo == na and lo == nb:
         return BufferDiffMarks(out^, deleted_below^)
-    var a_mid = List[String](capacity=na - lo - tail)
-    for k in range(lo, na - tail):
-        a_mid.append(head_lines[k])
-    var b_mid = List[String](capacity=nb - lo - tail)
-    for k in range(lo, nb - tail):
-        b_mid.append(buffer_lines[k])
     # Whole-file line numbers: the diffed middle starts at ``lo`` on both
     # sides.
-    var runs = change_runs(diff_lines(a_mid, b_mid), lo, lo)
+    var runs = change_runs(
+        diff_lines(head_lines[lo:na - tail], buffer_lines[lo:nb - tail]),
+        lo, lo,
+    )
     for ref run in runs:
         # A whole run is classified at once — Myers can emit inserts and
         # deletes in either order within it, so an insert can't be told

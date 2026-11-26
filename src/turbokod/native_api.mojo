@@ -1825,18 +1825,16 @@ def tk_desktop_merge(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         var c = json_object()
         c.put(String("ours"), json_string_array(m.regions[ri].ours_lines))
         c.put(String("theirs"), json_string_array(m.regions[ri].theirs_lines))
-        var before = List[String]()
+        var before = json_array()
         if ri > 0 and m.regions[ri - 1].kind == REGION_STABLE:
             ref ls = m.regions[ri - 1].lines
-            for k in range(max(0, len(ls) - 3), len(ls)):
-                before.append(ls[k])
-        var after = List[String]()
+            before = json_string_array(ls[max(0, len(ls) - 3):])
+        var after = json_array()
         if ri + 1 < len(m.regions) and m.regions[ri + 1].kind == REGION_STABLE:
             ref ls = m.regions[ri + 1].lines
-            for k in range(min(3, len(ls))):
-                after.append(ls[k])
-        c.put(String("before"), json_string_array(before))
-        c.put(String("after"), json_string_array(after))
+            after = json_string_array(ls[:min(3, len(ls))])
+        c.put(String("before"), before)
+        c.put(String("after"), after)
         c.put(String("choice"), json_int(m.states[ci].choice))
         c.put(String("edited"), json_string_array(m.states[ci].edited_lines))
         cs.append(c)

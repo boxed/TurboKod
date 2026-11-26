@@ -303,26 +303,15 @@ def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
 
 
 def _bytes_slice_to_string(
-    bytes: List[UInt8], start: Int, end: Int,
+    bytes: Span[UInt8, _], start: Int, end: Int,
 ) -> String:
-    """Copy ``bytes[start:end]`` into a fresh ``String``.
-
-    Constructed via ``ptr + length`` rather than the ``[a:b]`` slice
-    form because ``List[UInt8]`` slicing semantics (does it return a
-    Span or a List, in this Mojo version?) are version-sensitive in a
-    way that the ``ptr/length`` form isn't — it's the same idiom
-    ``editor.mojo`` uses for building a String from a freshly built
-    ``List[UInt8]``.
-    """
+    """``bytes[start:end]`` as a ``String``."""
     if start >= end:
         return String("")
-    var tmp = List[UInt8]()
-    for i in range(start, end):
-        tmp.append(bytes[i])
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=tmp.unsafe_ptr(), length=len(tmp))))
+    return String(StringSpan(unsafe_from_utf8=bytes[start:end]))
 
 
-def _split_alts(bytes: List[UInt8], start: Int, end: Int) -> List[String]:
+def _split_alts(bytes: Span[UInt8, _], start: Int, end: Int) -> List[String]:
     """Split the body of a ``{a,b,c}`` block on top-level commas."""
     var alts = List[String]()
     var depth = 0
@@ -348,10 +337,7 @@ def _expand_alternations(pat: String) -> List[String]:
     Output is a list of patterns containing only ``*``, ``**``, ``?`` and
     ``[...]`` — no more ``{}``.
     """
-    var bytes = List[UInt8]()
-    var pb = pat.as_bytes()
-    for x in range(len(pb)):
-        bytes.append(pb[x])
+    var bytes = pat.as_bytes()
     var i = 0
     while i < len(bytes):
         if bytes[i] == 0x7B:    # '{'
@@ -384,7 +370,7 @@ def _expand_alternations(pat: String) -> List[String]:
 
 
 def _gm(
-    pat: List[UInt8], pi: Int, path: List[UInt8], ti: Int,
+    pat: Span[UInt8, _], pi: Int, path: Span[UInt8, _], ti: Int,
     mut memo: List[Int],
 ) -> Bool:
     """Memoized glob matcher (no alternation — that's expanded upstream).
@@ -404,7 +390,7 @@ def _gm(
 
 
 def _gm_compute(
-    pat: List[UInt8], pi: Int, path: List[UInt8], ti: Int,
+    pat: Span[UInt8, _], pi: Int, path: Span[UInt8, _], ti: Int,
     mut memo: List[Int],
 ) -> Bool:
     var pn = len(pat)
@@ -479,14 +465,8 @@ def _gm_compute(
 
 def _glob_match_one(pat: String, path: String) -> Bool:
     """Match a single (alternation-expanded) glob against ``path``."""
-    var pb = List[UInt8]()
-    var pat_bytes = pat.as_bytes()
-    for i in range(len(pat_bytes)):
-        pb.append(pat_bytes[i])
-    var tb = List[UInt8]()
-    var path_bytes = path.as_bytes()
-    for i in range(len(path_bytes)):
-        tb.append(path_bytes[i])
+    var pb = pat.as_bytes()
+    var tb = path.as_bytes()
     # Tri-state memo over (pi, ti): the matcher revisits the same state
     # combinatorially on multi-star patterns without it.
     var memo = List[Int]()
