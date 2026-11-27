@@ -17,6 +17,8 @@ from turbokod.desktop import (
     DOCK_DEBUG_PANE, DOCK_NONE, DOCK_TEST_PANE, Desktop, PANEL_KIND_DEBUG,
     PANEL_KIND_TEST,
 )
+from turbokod.file_io import write_file
+from turbokod.lsp_dispatch import DefinitionResolved
 from turbokod.events import Event, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT
 from turbokod.geometry import Point, Rect
 from turbokod.window import (
@@ -26,7 +28,7 @@ from turbokod.window import (
     DOCK_PREVIEW_EDITOR, dock_order_edges, dock_preview_regions,
 )
 
-from support import setup_test_env
+from support import _temp_path, setup_test_env
 
 
 comptime _WIDE = Rect(0, 0, 200, 30)
@@ -240,6 +242,32 @@ def test_auto_hide_follows_keyboard_focus_moving_to_the_editors() raises:
     # Focusing it any way at all (here: Ctrl+9's path) brings it back.
     d._focus_dock(DOCK_DEBUG_PANE)
     assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+
+
+def test_jumping_to_a_file_focuses_the_editor_and_hides_panels() raises:
+    var path = _temp_path(String("_jump_focus.py"))
+    assert_true(write_file(path, String("a = 1\nb = 2\n")))
+    var d = _two_panes()
+    d.test_pane.dock.auto_hide = True
+    # Find in Project / Find Symbol / the pickers jump through ``_jump_to``.
+    d._focus_dock(DOCK_TEST_PANE)
+    d._jump_to(DefinitionResolved(path, 1, 0), _WIDE)
+    assert_false(d.test_pane.focused)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_true(d.main_focus_request)
+    # Quick Open opens through ``open_file``.
+    d._focus_dock(DOCK_TEST_PANE)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    d.quick_open.selected_path = path
+    d.quick_open.selected_paths = [path]
+    _ = d._after_quick_open(_WIDE)
+    assert_false(d.test_pane.focused)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    # A stack-frame click in the debug pane keeps the pane's keyboard.
+    d._focus_dock(DOCK_TEST_PANE)
+    d._jump_to(DefinitionResolved(path, 0, 0), _WIDE, focus_editor=False)
+    assert_true(d.test_pane.focused)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
 
 
 def test_auto_hide_restores_a_maximized_panel_and_keeps_its_neighbors() raises:

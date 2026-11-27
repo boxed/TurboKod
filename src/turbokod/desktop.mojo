@@ -4395,6 +4395,16 @@ struct Desktop(Movable):
         if focus:
             self._focus_dock(dock_kind_of_panel(kind), idx)
 
+    def _focus_editors(mut self):
+        """Hand the keyboard to the editors after a deliberate jump into
+        one (Quick Open, Find in Project, Find Symbol, a picker, …): no
+        pane keeps the focus, auto-hide panels roll up — even when an
+        editor already had the keyboard, so a panel a run brought out goes
+        away — and the project window comes to the front."""
+        self._focus_dock(DOCK_NONE)
+        self._auto_hide_panels()
+        self.main_focus_request = True
+
     def _auto_hide_panels(mut self):
         """Roll up every open, unfocused auto-hide panel on a docked edge:
         an editor has the focus. Floating ones stay — the editor doesn't
@@ -10728,6 +10738,7 @@ struct Desktop(Movable):
                         paths[i], ":", String(e),
                     )
             self.open_file(primary, screen)
+            self._focus_editors()
         return Optional[String]()
 
     def _after_project_find(mut self, screen: Rect) raises:
@@ -13519,9 +13530,11 @@ struct Desktop(Movable):
                         # that frame's source — golden-center it like every
                         # other navigation. (Single-stepping is the
                         # exception, handled on the stop event below.)
+                        # The pane keeps the keyboard, so the next frame
+                        # is a click away.
                         self._jump_to(
                             DefinitionResolved(fpath, fline, 0),
-                            screen, golden=True,
+                            screen, golden=True, focus_editor=False,
                         )
                     break
         # Variable expand click: request children for the row's ref.
@@ -15476,7 +15489,7 @@ struct Desktop(Movable):
 
     def _jump_to(
         mut self, target: DefinitionResolved, screen: Rect,
-        golden: Bool = True,
+        golden: Bool = True, focus_editor: Bool = True,
     ):
         """Focus the window for ``target.path`` (opening it if needed) and
         move the cursor to ``(line, character)``.
@@ -15486,7 +15499,12 @@ struct Desktop(Movable):
         the target at the golden-ratio point of the viewport whether the
         file opens fresh or was already on screen. The debugger passes
         ``golden=False`` so single-stepping keeps the minimal edge-scroll
-        that doesn't yank the view on every step."""
+        that doesn't yank the view on every step.
+
+        A golden jump also hands the keyboard to the editor
+        (``_focus_editors``: auto-hide panels roll up), unless
+        ``focus_editor`` is False — the debug pane's stack-frame click,
+        which keeps the pane live for the next frame."""
         var existing = self._find_window_for_path(target.path)
         # While reviewing, a definition that lands in the file under review
         # stays in the review window (don't bounce to a stale duplicate that
@@ -15520,6 +15538,8 @@ struct Desktop(Movable):
         # (``golden=False``) does *not* yank the window forward each step.
         if golden:
             self.main_focus_request = True
+            if focus_editor:
+                self._focus_editors()
 
     def _click_landed_at_definition(
         self, lsp_idx: Int, target: DefinitionResolved,

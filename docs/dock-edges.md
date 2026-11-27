@@ -111,7 +111,13 @@ A top region whose panels are all rolled up is just their header rows.
     `_focus_dock`, such as an output-pane link opening a file;
   - on every left press that lands in an editor window, even one that was
     already focused, so a panel a run brought out goes away on your next click
-    into the code.
+    into the code;
+  - on a deliberate jump into a file — Quick Open, Find in Project, Find
+    Symbol, the symbol / reference pickers, go-to-definition, nav history:
+    `_focus_editors()` (called from `_after_quick_open` and every golden
+    `_jump_to`) takes the keyboard from the panes and brings the project
+    window to the front. A debug-pane stack-frame click passes
+    `focus_editor=False` so the pane stays live for the next frame.
 - **Restoring.** `_focus_dock` restores an auto-hidden pane it focuses. That
   covers a click on its header, a strip tab, Ctrl+9, the Window menu and
   anything else that focuses a pane. A run, test or debug (re)start brings its
