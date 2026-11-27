@@ -139,15 +139,26 @@ def menu_step_wrap(selected: Int, delta: Int, n: Int) -> Int:
     return i
 
 
-@fieldwise_init
 struct NativeMenuItem(Copyable, Movable):
     """One row of an anchored popup as the native host shows it (an
     ``NSMenu`` item, macOS-style UI): its label, the action code
-    answering it, and whether it can be picked. Each menu's
-    ``native_items`` lists the same rows its ``paint`` draws."""
+    answering it, whether it can be picked, and an optional SF Symbol
+    the ``NSMenu`` shows beside it (the grid and Platinum menus don't).
+    Each menu's ``native_items`` lists the same rows its ``paint``
+    draws."""
     var label: String
     var code: Int
     var enabled: Bool
+    var icon: String
+
+    def __init__(
+        out self, var label: String, code: Int, enabled: Bool,
+        var icon: String = String(""),
+    ):
+        self.label = label^
+        self.code = code
+        self.enabled = enabled
+        self.icon = icon^
 
     @staticmethod
     def separator() -> Self:

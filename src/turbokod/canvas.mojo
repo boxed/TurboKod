@@ -97,6 +97,14 @@ comptime HOST_TEST_DETAIL = UInt8(6)
 test list and the selected test's detail — which the host draws as native
 views of its look, filled from ``tk_desktop_test_results``. ``tag`` names
 the pane (``TestResultsView.host_tag``)."""
+comptime HOST_DOCK_TAB = UInt8(7)
+"""A tab of a side column rolled up into a strip
+(``Desktop._strip_tabs``): ``label`` is its panel's title, drawn running
+down the tab; ``active`` is the panel having the focus; ``side_by_side``
+is True on the left edge (the tab reads bottom to top there, top to
+bottom on the right). ``tag`` is the panel (``DOCK_*`` kind × 1000 +
+index)."""
+
 
 
 @fieldwise_init
@@ -131,6 +139,9 @@ struct HostItem(Copyable, Movable):
     var tag: Int
     """Which instance an item belongs to, where the host needs to ask the
     core about it (the test results views); 0 otherwise."""
+    var label: String
+    """Text the host draws on it: a ``HOST_DOCK_TAB``'s panel title;
+    empty otherwise."""
 
 
 @fieldwise_init

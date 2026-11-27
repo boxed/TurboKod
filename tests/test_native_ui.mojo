@@ -1014,13 +1014,13 @@ def test_native_debug_inspect_hands_the_columns_to_the_host() raises:
     d.native_debug_act(3, -1, String("y + 1"))
     assert_equal(d._dap_watch_exprs[len(d._dap_watch_exprs) - 1], String("y + 1"))
     # Floating panels: the panel window's paint hands them over too.
-    d.panels_detached = True
+    d.float_all_panels(True)
     canvas.clear(default_attr())
     d.paint_panels(canvas, _SCREEN)
     assert_true(d.debug_pane.dock.host_chrome)
     assert_true(d.debug_pane.host_inspect)
     assert_false(d.debug_pane.native_rect.is_empty())
-    d.panels_detached = False
+    d.float_all_panels(False)
     # Retro: the grid paints the columns again.
     d.config.native_ui = False
     canvas.clear(default_attr())
@@ -1044,7 +1044,7 @@ def test_platinum_pane_headers_are_the_hosts_but_the_inspect_stays_grid() raises
     assert_true(d.native_panes_shown())
     assert_true(d.debug_pane.dock.host_chrome)
     assert_false(d.debug_pane.host_inspect)
-    d.panels_detached = True
+    d.float_all_panels(True)
     canvas.clear(default_attr())
     d.paint_panels(canvas, _SCREEN)
     assert_true(d.native_panels_shown())
@@ -1272,7 +1272,7 @@ def test_a_floating_terminal_has_the_keyboard_only_in_its_own_window() raises:
     pane.visible = True
     d.terminal_panes.append(pane^)
     d.terminal_panes[0].focused = True
-    d.panels_detached = True
+    d.float_all_panels(True)
     # A key typed in the project window.
     _ = d.handle_event(Event.key_event(UInt32(ord("!"))), _SCREEN)
     assert_equal(d.windows.windows[0].editor.text_snapshot(), String("alpha beta!"))

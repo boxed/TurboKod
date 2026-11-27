@@ -34,7 +34,7 @@ from .canvas import Canvas
 from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN,
-    LIGHT_GRAY, RED, SYN_COMMENT, SYN_DECORATOR, SYN_IDENT, SYN_KEYWORD,
+    LIGHT_GRAY, PANE_BG, PANE_FG, RED, SYN_COMMENT, SYN_DECORATOR, SYN_IDENT, SYN_KEYWORD,
     SYN_NUMBER, SYN_OPERATOR, SYN_STRING, WHITE, YELLOW,
 )
 from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_POPUP, Dropdown
@@ -54,12 +54,17 @@ from .ui_tree import (
     UIDialog, UI_BROWSE, UI_BUTTON, UI_CENTER, UI_CHECK, UI_CHECKABLE,
     UI_CHOICE, UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING,
     UI_HOTKEY, UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR,
-    UI_SPACER, UI_DISABLED, UI_PREVIEW, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK,
+    UI_SPACER, UI_DISABLED, UI_DOCK_PREVIEW, UI_PREVIEW, UI_TABLE, UI_TABS,
+    UI_TEXT, UI_VSTACK,
     UINode, UI_CODE, UI_LARGE, UI_LIST, UI_MULTI, UI_NAV, UI_RGB, ui_button,
     ui_list_anchor, ui_list_selected, ui_list_selection,
 )
 from .scrollbar import ScrollBarArea
-from .window import close_button_clicked, paint_modal_frame, paint_window_title
+from .window import (
+    DOCK_PREVIEW_EDITOR, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP,
+    close_button_clicked, dock_preview_regions, paint_modal_frame,
+    paint_window_title,
+)
 
 
 comptime _MARGIN_X = 2
@@ -182,6 +187,8 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
         return (0, 0)
     if k == UI_PREVIEW:
         return (40, len(_preview_lines()))
+    if k == UI_DOCK_PREVIEW:
+        return (28, 10)
     if k == UI_LIST:
         return (60, max(n.height, 3))
     if k == UI_TABLE:
@@ -782,6 +789,8 @@ struct GridForm(Movable):
                 self._paint_list(canvas, p.node, p.rect, focused)
             elif k == UI_PREVIEW:
                 _paint_preview(canvas, painter, p.rect)
+            elif k == UI_DOCK_PREVIEW:
+                _paint_dock_preview(canvas, painter, p.rect, p.node.value)
             elif k == UI_TABS:
                 self._paint_tabs(canvas, p.node, p.rect, focused)
         swap(placed, self._placed)
@@ -1332,6 +1341,51 @@ def _paint_preview(mut canvas: Canvas, painter: Painter, r: Rect):
                 canvas, Point(x, r.a.y + y), lines[y][i][0],
                 Attr(lines[y][i][1], EDITOR_BG),
             )
+
+
+def _paint_dock_preview(
+    mut canvas: Canvas, painter: Painter, r: Rect, order: String,
+):
+    """The docked edges' cut order in miniature: a box per edge, named,
+    in the panes' colors, around the editors' box in theirs."""
+    for reg in dock_preview_regions(order, r):
+        var edge = reg[0]
+        var box = reg[1]
+        if box.width() < 2 or box.height() < 2:
+            continue
+        var editor = edge == DOCK_PREVIEW_EDITOR
+        var attr = Attr(EDITOR_FG, EDITOR_BG) if editor \
+            else Attr(PANE_FG, PANE_BG)
+        painter.fill(canvas, box, String(" "), attr)
+        painter.draw_box(canvas, box, attr, False)
+        var name = String("Editor") if editor else _edge_title(edge)
+        if box.width() - 2 < display_columns(name):
+            name = _edge_initial(edge)
+        var x = box.a.x + (box.width() - display_columns(name)) // 2
+        var y = box.a.y + box.height() // 2
+        _ = painter.put_text(canvas, Point(x, y), name, attr)
+
+
+def _edge_title(edge: UInt8) -> String:
+    if edge == EDGE_LEFT:
+        return String("Left")
+    if edge == EDGE_RIGHT:
+        return String("Right")
+    if edge == EDGE_TOP:
+        return String("Top")
+    return String("Bottom")
+
+
+def _edge_initial(edge: UInt8) -> String:
+    if edge == DOCK_PREVIEW_EDITOR:
+        return String("E")
+    if edge == EDGE_LEFT:
+        return String("L")
+    if edge == EDGE_RIGHT:
+        return String("R")
+    if edge == EDGE_TOP:
+        return String("T")
+    return String("B")
 
 
 def _sep_cell() -> Cell:

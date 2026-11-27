@@ -343,7 +343,169 @@ comptime PANEL_STATE_NORMAL    = UInt8(0)
 comptime PANEL_STATE_MINIMIZED = UInt8(1)
 comptime PANEL_STATE_MAXIMIZED = UInt8(2)
 comptime PANEL_STATE_NONE      = UInt8(255)
+
 """``BottomDockedPanel.yielded`` when the panel isn't yielding."""
+
+# Which edge of the project window a tool panel docks to, or the floating
+# panels' window. See docs/dock-edges.md.
+comptime EDGE_BOTTOM = UInt8(0)
+comptime EDGE_TOP    = UInt8(1)
+comptime EDGE_LEFT   = UInt8(2)
+comptime EDGE_RIGHT  = UInt8(3)
+comptime EDGE_FLOAT  = UInt8(4)
+comptime EDGE_COUNT  = 5
+
+
+def edge_name(edge: UInt8) -> String:
+    """The config spelling of ``edge``."""
+    if edge == EDGE_TOP:
+        return String("top")
+    if edge == EDGE_LEFT:
+        return String("left")
+    if edge == EDGE_RIGHT:
+        return String("right")
+    if edge == EDGE_FLOAT:
+        return String("float")
+    return String("bottom")
+
+
+comptime DOCK_ORDER_DEFAULT = "left,right,top,bottom"
+"""The edges' cut order (``config.dock_order``) until the user changes it:
+side columns full height, the top region and the bottom stack between
+them."""
+
+
+def dock_order_edges(spec: String) -> List[UInt8]:
+    """The four docked edges in the order ``spec`` (comma-separated edge
+    names, first cuts first) ranks them. Unknown or repeated names are
+    dropped, and edges it leaves out follow in the default order, so any
+    string gives all four once."""
+    var out = List[UInt8]()
+    for part in spec.split(","):
+        var name = String(part.strip())
+        if name != "left" and name != "right" and name != "top" \
+                and name != "bottom":
+            continue
+        var e = edge_from_name(name)
+        var seen = False
+        for x in out:
+            if x == e:
+                seen = True
+        if not seen:
+            out.append(e)
+    for e in [EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, EDGE_BOTTOM]:
+        var seen = False
+        for x in out:
+            if x == e:
+                seen = True
+        if not seen:
+            out.append(e)
+    return out^
+
+
+comptime DOCK_PREVIEW_EDITOR = UInt8(255)
+"""``dock_preview_regions``' tag for what's left: the editors."""
+
+
+def dock_preview_regions(spec: String, area: Rect) -> List[Tuple[UInt8, Rect]]:
+    """A miniature of the cut order ``spec``: with a panel on every edge,
+    each edge's region of ``area`` (a quarter of its width or height) in
+    the order they cut, then the editors' (``DOCK_PREVIEW_EDITOR``). What
+    Settings' preview draws, in every projector."""
+    var out = List[Tuple[UInt8, Rect]]()
+    var r = area
+    var side = max(1, area.width() // 4)
+    var band = max(1, area.height() // 4)
+    for e in dock_order_edges(spec):
+        if e == EDGE_LEFT:
+            var w = min(side, r.width())
+            out.append((e, Rect(r.a.x, r.a.y, r.a.x + w, r.b.y)))
+            r = Rect(r.a.x + w, r.a.y, r.b.x, r.b.y)
+        elif e == EDGE_RIGHT:
+            var w = min(side, r.width())
+            out.append((e, Rect(r.b.x - w, r.a.y, r.b.x, r.b.y)))
+            r = Rect(r.a.x, r.a.y, r.b.x - w, r.b.y)
+        elif e == EDGE_TOP:
+            var h = min(band, r.height())
+            out.append((e, Rect(r.a.x, r.a.y, r.b.x, r.a.y + h)))
+            r = Rect(r.a.x, r.a.y + h, r.b.x, r.b.y)
+        else:
+            var h = min(band, r.height())
+            out.append((e, Rect(r.a.x, r.b.y - h, r.b.x, r.b.y)))
+            r = Rect(r.a.x, r.a.y, r.b.x, r.b.y - h)
+    out.append((DOCK_PREVIEW_EDITOR, r))
+    return out^
+
+
+def dock_order_spec(edges: List[UInt8]) -> String:
+    """``dock_order_edges``' inverse."""
+    var out = String("")
+    for i in range(len(edges)):
+        if i > 0:
+            out += ","
+        out += edge_name(edges[i])
+    return out^
+
+
+def dock_edge_icon(edge: UInt8) -> String:
+    """The SF Symbol a native menu shows beside docking to ``edge``: a
+    window with that third filled in, or a window over a window for
+    floating."""
+    if edge == EDGE_LEFT:
+        return String("rectangle.leftthird.inset.filled")
+    if edge == EDGE_RIGHT:
+        return String("rectangle.rightthird.inset.filled")
+    if edge == EDGE_TOP:
+        return String("rectangle.topthird.inset.filled")
+    if edge == EDGE_FLOAT:
+        return String("macwindow.on.rectangle")
+    return String("rectangle.bottomthird.inset.filled")
+
+
+comptime DOCK_AUTO_HIDE_ICON = "rectangle.compress.vertical"
+"""The SF Symbol beside a native menu's Auto-hide item."""
+
+
+def dock_spec(edge: UInt8, home: UInt8) -> String:
+    """A panel's placement as the config spells it: the edge's name, or
+    ``float:<home>`` for a floating one."""
+    if edge == EDGE_FLOAT:
+        return String("float:") + edge_name(home)
+    return edge_name(edge)
+
+
+def dock_spec_edge(spec: String) -> UInt8:
+    """The edge a ``dock_spec`` names."""
+    if spec.startswith("float"):
+        return EDGE_FLOAT
+    return edge_from_name(spec)
+
+
+def dock_spec_home(spec: String) -> UInt8:
+    """The docked edge a ``dock_spec`` falls back to."""
+    if spec.startswith("float:"):
+        var b = spec.as_bytes()
+        var home = edge_from_name(String(StringSpan(
+            unsafe_from_utf8=b[6:len(b)],
+        )))
+        return home
+    if spec.startswith("float"):
+        return EDGE_BOTTOM
+    return edge_from_name(spec)
+
+
+def edge_from_name(name: String) -> UInt8:
+    """``edge_name``'s inverse; anything unknown is the bottom."""
+    if name == "top":
+        return EDGE_TOP
+    if name == "left":
+        return EDGE_LEFT
+    if name == "right":
+        return EDGE_RIGHT
+    if name == "float":
+        return EDGE_FLOAT
+    return EDGE_BOTTOM
+
 
 # How long the outline marking where a ping came from takes to fade out
 # once the user switches to its window.
@@ -580,6 +742,24 @@ struct BottomDockedPanel(Copyable, Movable):
     become seen by the user switching to the window; the outline fades
     out over ``ATTENTION_FLASH_MS``. See ``Desktop.attention_flashes``."""
 
+    var edge: UInt8
+    """Where the panel docks: an ``EDGE_*``. ``EDGE_FLOAT`` puts it in
+    the floating panels' window while the host allows one
+    (``Desktop.effective_edge``)."""
+
+    var home_edge: UInt8
+    """The docked edge (never ``EDGE_FLOAT``) the panel goes to when it
+    can't float: no panel window in this display configuration, or the
+    panel window was closed."""
+
+    var auto_hide: Bool
+    """Roll the panel up when an editor gets the focus, and back out when
+    the panel does. See ``Desktop._auto_hide_panels``."""
+
+    var hidden_from: UInt8
+    """The state auto-hide rolled the panel up from, which focusing it
+    puts back; ``PANEL_STATE_NONE`` while it isn't auto-hidden."""
+
     def __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
         self.preferred_height = preferred_height
@@ -599,6 +779,53 @@ struct BottomDockedPanel(Copyable, Movable):
         self.resize_yielded = PANEL_STATE_NONE
         self.attention_unseen = 0
         self.flash_start_ms = -1
+        self.edge = EDGE_BOTTOM
+        self.home_edge = EDGE_BOTTOM
+        self.auto_hide = False
+        self.hidden_from = PANEL_STATE_NONE
+
+    def set_edge(mut self, edge: UInt8):
+        """Dock to ``edge``. A docked edge is also the one floating falls
+        back to. An auto-hidden panel comes back out: it moved because
+        the user is working with it."""
+        self.edge = edge
+        if edge != EDGE_FLOAT:
+            self.home_edge = edge
+        _ = self.unhide()
+        self.resizing = False
+
+    def auto_hide_now(mut self) -> Bool:
+        """Roll up for auto-hide, remembering the state to restore. A
+        panel minimized to make room for a maximized one restores to the
+        state it yielded, and stops yielding so the maximized panel
+        losing its state doesn't bring it back. True when it changed."""
+        if self.hidden_from != PANEL_STATE_NONE:
+            if self.state == PANEL_STATE_MINIMIZED:
+                return False
+            # Opened some other way (its button, a drag) since it hid.
+            self.hidden_from = PANEL_STATE_NONE
+        if self.state == PANEL_STATE_MINIMIZED:
+            if self.yielded == PANEL_STATE_NONE:
+                return False
+            self.hidden_from = self.yielded
+            self.yielded = PANEL_STATE_NONE
+            return True
+        self.hidden_from = self.state
+        self.kept_open = False
+        self.max_acked = False
+        self.set_state(PANEL_STATE_MINIMIZED)
+        return True
+
+    def unhide(mut self) -> Bool:
+        """Put an auto-hidden panel back the way it was. True when it was
+        hidden."""
+        if self.hidden_from == PANEL_STATE_NONE:
+            return False
+        var s = self.hidden_from
+        self.hidden_from = PANEL_STATE_NONE
+        if self.state == PANEL_STATE_MINIMIZED:
+            self.set_state(s)
+        return True
 
     def header_rows(self) -> Int:
         """Rows the header takes: one in the grid, two under the host's

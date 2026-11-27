@@ -20,12 +20,13 @@ from turbokod.desktop import (
     DEBUG_CLEAR_OUTPUT, DEBUG_START_OR_CONTINUE, EDITOR_TOGGLE_LINE_NUMBERS,
     APP_QUIT_ACTION, Desktop, EDITOR_FIND, EDITOR_OPEN, EDITOR_QUICK_OPEN,
     EDITOR_FIND_SYMBOL, GIT_REVIEW, TARGET_TEST,
-    EDITOR_SAVE, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI, WINDOW_CLOSE, ctrl_key
+    EDITOR_SAVE, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI, WINDOW_CLOSE, ctrl_key,
+    VIEW_DOCK_FLOAT, VIEW_DOCK_LEFT,
 )
 from turbokod.file_io import read_file, write_file
 from turbokod.file_tree import FILE_TREE_WIDTH
 from turbokod.app_menus import (
-    NEW_WINDOW, TOGGLE_FLOATING_PANELS, build_menus,
+    NEW_WINDOW, build_menus,
 )
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.buttons import (
@@ -1228,7 +1229,7 @@ def test_floating_panel_splitter_drag_resizes_upper_pane() raises:
     # Two non-terminal panels (no pty needed): debug on top, test below.
     d.debug_pane.visible = True
     d.test_pane.visible = True
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     # Default preferred_height is 14, so the debug slot is rows [0,14)
     # and the test slot (last) absorbs [14,40). The splitter is row 14.
@@ -1279,7 +1280,7 @@ def test_double_click_on_a_panel_header_toggles_minimized() raises:
     var d = Desktop()
     d.debug_pane.visible = True
     d.test_pane.visible = True
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     _double_click_panels(d, Point(60, 14), screen)
     assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
@@ -1301,7 +1302,7 @@ def test_floating_panel_top_border_does_not_self_resize() raises:
     var d = Desktop()
     d.debug_pane.visible = True
     d.test_pane.visible = True
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     _ = d.handle_panels_event(
         Event.mouse_event(Point(5, 0), MOUSE_BUTTON_LEFT, True, False),
@@ -1325,7 +1326,7 @@ def test_floating_panel_title_command_click_beats_splitter() raises:
     pane's Stop/Restart/Clear were dead whenever another panel sat
     above it in the floating stack."""
     var d = Desktop()
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     # Post-run hold on both panes keeps them visible through dap_tick
     # and builds their command strips (Restart/Re-run + Clear).
@@ -1369,7 +1370,7 @@ def test_floating_debug_console_takes_focus_and_typing() raises:
     focuses the pane, and keys sent to the panel window type into the
     console field."""
     var d = Desktop()
-    d.panels_detached = True
+    d.float_all_panels(True)
     d.debug_pane.visible = True
     d.debug_pane.set_mode(PANE_MODE_DEBUG)
     d.debug_pane.repl_enabled = True
@@ -1398,7 +1399,7 @@ def test_floating_panel_minimize_bottom_keeps_one_row() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     d.test_pane.dock.set_state(PANEL_STATE_MINIMIZED)
     var slots = d._panel_window_slots(screen)
@@ -1416,7 +1417,7 @@ def test_floating_panel_minimize_top_keeps_one_row() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     d.debug_pane.dock.set_state(PANEL_STATE_MINIMIZED)
     var slots = d._panel_window_slots(screen)
@@ -1612,7 +1613,7 @@ def test_floating_panel_drags_open_under_a_maximized_one() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     d.debug_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
     d._coalesce_dock_states()
@@ -1653,7 +1654,7 @@ def test_floating_panel_above_a_maximized_one_drags_open() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom, maximized
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     d.test_pane.dock.set_state(PANEL_STATE_MAXIMIZED)
     d._coalesce_dock_states()
@@ -1676,7 +1677,7 @@ def test_floating_rolled_up_bottom_panel_drags_open() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     d.test_pane.dock.set_state(PANEL_STATE_MINIMIZED)
     assert_equal(
@@ -1713,7 +1714,7 @@ def test_floating_splitter_rolls_the_upper_panel_up_and_opens_it() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     _ = d.handle_panels_event(_press(Point(5, 14)), screen)
     _ = d.handle_panels_event(_drag_to(Point(5, 1)), screen)
@@ -1748,7 +1749,7 @@ def test_floating_splitter_drag_passes_through_rolled_up_panels() raises:
     d.debug_pane.visible = True          # top
     d.find_results_pane.visible = True   # middle
     d.test_pane.visible = True           # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     d.find_results_pane.dock.set_state(PANEL_STATE_MINIMIZED)
     d.test_pane.dock.set_state(PANEL_STATE_MINIMIZED)
@@ -1782,7 +1783,7 @@ def test_floating_panels_window_has_a_turbo_vision_frame() raises:
     var d = Desktop()
     d.debug_pane.visible = True   # top
     d.test_pane.visible = True    # bottom
-    d.panels_detached = True
+    d.float_all_panels(True)
     var screen = Rect(0, 0, 80, 40)
     assert_false(d.panels_framed(screen))
     var slots = d._panel_window_slots(screen)
@@ -1967,8 +1968,8 @@ def test_debug_pane_commands_follow_the_session_state() raises:
 
 def test_both_frontends_share_one_menu_definition() raises:
     """The terminal and native frontends build the same menus; only the
-    host-only items (New window, Floating panels, macOS-style UI, Mac OS
-    9-style UI) differ. The terminal
+    host-only items (New window, Float Panel, Floating git window,
+    macOS-style UI, Mac OS 9-style UI) differ. The terminal
     demo used to carry its own copy, which had silently lost the whole
     Navigation menu, Debug ▸ Test and Git ▸ Review."""
     var tui = Desktop()
@@ -1981,17 +1982,19 @@ def test_both_frontends_share_one_menu_definition() raises:
     assert_true(TARGET_TEST in tui_actions)
     assert_true(GIT_REVIEW in tui_actions)
     assert_false(NEW_WINDOW in tui_actions)
-    assert_false(TOGGLE_FLOATING_PANELS in tui_actions)
+    assert_false(VIEW_DOCK_FLOAT in tui_actions)
+    assert_true(VIEW_DOCK_LEFT in tui_actions)
     assert_true(NEW_WINDOW in native_actions)
-    assert_true(TOGGLE_FLOATING_PANELS in native_actions)
+    assert_true(VIEW_DOCK_FLOAT in native_actions)
     assert_false(VIEW_NATIVE_UI in tui_actions)
     assert_true(VIEW_NATIVE_UI in native_actions)
     assert_false(VIEW_PLATINUM_UI in tui_actions)
     assert_true(VIEW_PLATINUM_UI in native_actions)
     assert_false(VIEW_CLASSIC_UI in tui_actions)
     assert_true(VIEW_CLASSIC_UI in native_actions)
-    # The four items plus the separator before the looks.
-    assert_equal(len(native_actions), len(tui_actions) + 6)
+    # New window, Float Panel, the floating git window and its separator,
+    # and the three looks with theirs.
+    assert_equal(len(native_actions), len(tui_actions) + 8)
 
 
 def test_opening_a_picker_over_another_hands_it_the_keyboard() raises:

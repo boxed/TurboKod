@@ -24,7 +24,7 @@ from std.memory import unsafe_memcpy
 from std.sys import size_of
 
 from turbokod.canvas import (
-    Canvas, HOST_HSCROLL, HOST_SPLIT, HOST_SURFACE_DIALOG, HOST_SURFACE_GIT,
+    Canvas, HOST_DOCK_TAB, HOST_HSCROLL, HOST_SPLIT, HOST_SURFACE_DIALOG, HOST_SURFACE_GIT,
     HOST_TEST_DETAIL, HOST_TEST_HEADER, HOST_TEST_LIST,
     HOST_SURFACE_MAIN, HOST_SURFACE_PANELS, HOST_SURFACE_SETTINGS,
     HOST_SURFACES, HOST_VSCROLL, SubGrid,
@@ -76,12 +76,10 @@ from turbokod.posix import wall_clock_ms
 from turbokod.host_abi import (
     ACT_CLOSE_WINDOW, ACT_NEW_WINDOW, ACT_NONE, ACT_OPEN_FILE,
     ACT_OPEN_PROJECT, ACT_QUICK_OPEN, ACT_QUIT, ACT_TOGGLE_FLOATING_GIT,
-    ACT_TOGGLE_FLOATING_PANELS,
     pack_canvas, pack_cells, shape_code,
 )
 from turbokod.app_menus import (
     build_menus, NEW_WINDOW, refresh_menu_visibility, TOGGLE_FLOATING_GIT,
-    TOGGLE_FLOATING_PANELS,
 )
 
 
@@ -140,7 +138,6 @@ def _action_code(action: Optional[String]) -> Int32:
     if a == PROJECT_OPEN:      return ACT_OPEN_PROJECT
     if a == NEW_WINDOW:        return ACT_NEW_WINDOW
     if a == CLOSE_WINDOW:      return ACT_CLOSE_WINDOW
-    if a == TOGGLE_FLOATING_PANELS: return ACT_TOGGLE_FLOATING_PANELS
     if a == TOGGLE_FLOATING_GIT: return ACT_TOGGLE_FLOATING_GIT
     return ACT_NONE
 
@@ -856,23 +853,31 @@ def tk_desktop_set_font_size_info(h: Int, effective: Int, ideal: Int) abi("C"):
 
 
 @export
-def tk_desktop_set_panels_detached(h: Int, on: Int) abi("C"):
-    """Tell the Desktop its tool panels are rendered on a separate host
-    window (the native "Floating panels" feature).
+def tk_desktop_set_float_allowed(h: Int, on: Int) abi("C"):
+    """Tell the Desktop whether the host has a floating panels' window for
+    it (the native app, in a display configuration that has one).
 
-    When ``on`` is non-zero, the main surface (``paint`` / ``workspace_rect``
-    / ``handle_event``) ignores the terminal / debug / test panels — the
-    editor area reclaims the freed rows — and the host drives the second
-    surface via ``tk_desktop_surface_*`` (``HOST_SURFACE_PANELS``). Also
-    flips the View ▸ Floating panels checkmark. See docs/floating-panels.md."""
+    While ``on`` is non-zero, panels whose edge is Floating render on that
+    window, which the host drives via ``tk_desktop_surface_*``
+    (``HOST_SURFACE_PANELS``); while it's zero they dock to their home
+    edges. See docs/dock-edges.md and docs/floating-panels.md."""
     if h == 0:
         return
-    _desk(h)[].panels_detached = on != 0
+    _desk(h)[].float_allowed = on != 0
+
+
+@export
+def tk_desktop_dock_floating_home(h: Int) abi("C"):
+    """The floating panels' window was closed: its panels dock to their
+    home edges (and their kinds with them)."""
+    if h == 0:
+        return
+    _desk(h)[].dock_floating_panels_home()
 
 
 @export
 def tk_desktop_panels_visible_count(h: Int) abi("C") -> Int:
-    """Number of tool panels currently open (terminal + debug + test).
+    """Number of tool panels currently open in the floating panels' window.
 
     The host polls this to auto-hide the floating panel window when the last
     panel closes and re-show it when one reopens. See docs/floating-panels.md."""
@@ -1089,6 +1094,7 @@ comptime _REQ_PANEL_FOCUS = 1
 comptime _REQ_PANEL_FRONT = 2
 comptime _REQ_MAIN_FOCUS = 4
 comptime _REQ_GIT_FRONT = 8
+comptime _REQ_PANELS_FLOAT = 16
 
 
 @export
@@ -1108,6 +1114,8 @@ def tk_desktop_take_window_requests(h: Int, mask: Int) abi("C") -> Int32:
       open-at-line jump (an output-pane link click or a ``turbokod://``
       open) mustn't leave the code behind the panels.
     - 8: bring the git window forward (Git ▸ Local changes while it's up).
+    - 16: open a floating panels' window — a panel was just floated while
+      there's none — and allow floating (``tk_desktop_set_float_allowed``).
     """
     if h == 0:
         return Int32(0)
@@ -1121,6 +1129,8 @@ def tk_desktop_take_window_requests(h: Int, mask: Int) abi("C") -> Int32:
         out |= _REQ_MAIN_FOCUS
     if (mask & _REQ_GIT_FRONT) != 0 and d.consume_git_front_request():
         out |= _REQ_GIT_FRONT
+    if (mask & _REQ_PANELS_FLOAT) != 0 and d.take_panels_float_request():
+        out |= _REQ_PANELS_FLOAT
     return Int32(out)
 
 
@@ -2077,7 +2087,9 @@ def tk_desktop_host_items(
     0 project window, 1 floating panels, 2 Settings, 3 dialog, 4 git) for
     the host to draw in its look (``canvas.HostItem``): an array of
     ``{kind, x, y, w, h, side, active, ka, kb, fg, bg}`` — ``kind``
-    ``"split"`` / ``"vscroll"`` / ``"hscroll"``; the rect in thousandths of
+    ``"split"`` / ``"vscroll"`` / ``"hscroll"`` / ``"dock_tab"`` (with its
+    ``label``, a side strip's tab: ``side`` is the left edge, ``active`` the
+    panel focused, ``tag`` the panel); the rect in thousandths of
     a cell; a split's orientation (``side``: halves left / right) and
     whether it's dragged; a scroll bar's thumb span along it (``ka`` ..
     ``kb``, same units); the colors the core would have used (0xRRGGBB).
@@ -2101,6 +2113,9 @@ def tk_desktop_host_items(
             o.put(String("kind"), json_str(String("vscroll")))
         elif it.kind == HOST_HSCROLL:
             o.put(String("kind"), json_str(String("hscroll")))
+        elif it.kind == HOST_DOCK_TAB:
+            o.put(String("kind"), json_str(String("dock_tab")))
+            o.put(String("label"), json_str(it.label))
         else:
             continue
         o.put(String("x"), json_int(it.x))
@@ -2365,7 +2380,7 @@ def tk_desktop_debug_inspect(
     ref p = d.debug_pane
     var r = p.native_rect
     if not p.visible or not p.host_inspect or r.is_empty() \
-            or d.panels_detached != (panels != 0):
+            or d._is_floating(d.debug_pane.dock) != (panels != 0):
         return 0
     var pane_bottom = d.debug_pane_rect(Rect(0, 0, cols, rows)).b.y
     if panels != 0:
@@ -2596,6 +2611,8 @@ def tk_desktop_popup(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         it.put(String("label"), json_str(rows[i].label))
         it.put(String("code"), json_int(rows[i].code))
         it.put(String("enabled"), json_bool(rows[i].enabled))
+        if len(rows[i].icon.as_bytes()) > 0:
+            it.put(String("icon"), json_str(rows[i].icon))
         if rows[i].is_separator():
             it.put(String("separator"), json_bool(True))
         items.append(it)

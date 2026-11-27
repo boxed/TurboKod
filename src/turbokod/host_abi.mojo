@@ -24,7 +24,8 @@ comptime ACT_QUICK_OPEN             = Int32(3)
 comptime ACT_OPEN_PROJECT           = Int32(4)
 comptime ACT_NEW_WINDOW             = Int32(5)
 comptime ACT_CLOSE_WINDOW           = Int32(6)
-comptime ACT_TOGGLE_FLOATING_PANELS = Int32(7)
+# 7 was ACT_TOGGLE_FLOATING_PANELS (the all-panels Floating switch, now a
+# per-panel dock edge): reserved.
 comptime ACT_TOGGLE_FLOATING_GIT    = Int32(8)
 
 # Pointer shapes reported by ``tk_desktop_pointer_shape``.

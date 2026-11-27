@@ -36,6 +36,8 @@ from .desktop import (
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
     EDITOR_TOGGLE_STICKY_SCROLL,
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
+    VIEW_DOCK_AUTO_HIDE, VIEW_DOCK_BOTTOM, VIEW_DOCK_FLOAT, VIEW_DOCK_LEFT,
+    VIEW_DOCK_RIGHT, VIEW_DOCK_TOP,
     FILE_TREE_FOCUS, FILE_TREE_REVEAL,
     GIT_HISTORY_FILE, GIT_HISTORY_SELECTION, GIT_LOCAL_CHANGES,
     GIT_OPEN_ALL_CHANGED, GIT_REVIEW, GIT_REVIEW_NAMES,
@@ -51,15 +53,14 @@ from .events import (
     MOD_SHIFT,
 )
 from .menu import Menu, MenuItem
+from .window import (
+    DOCK_AUTO_HIDE_ICON, EDGE_BOTTOM, EDGE_FLOAT, EDGE_LEFT, EDGE_RIGHT,
+    EDGE_TOP, dock_edge_icon,
+)
 
 
 # Host action: open a new Desktop window (Desktop returns it unclaimed).
 comptime NEW_WINDOW = String("app.new_window")
-# Host action: toggle the native "Floating panels" feature for this window.
-# The host owns the windowing (it creates/destroys the separate panel
-# window) and then calls ``tk_desktop_set_panels_detached`` to update the
-# Desktop flag that drives the View-menu checkmark. See docs/floating-panels.md.
-comptime TOGGLE_FLOATING_PANELS = String("app.toggle_floating_panels")
 # Host action: float the git view's window off the project window, or dock
 # it back over it (the same as its title bar's dock box). The host owns the
 # window and its remembered placement, and reports the result through
@@ -172,12 +173,38 @@ def build_menus(mut d: Desktop, native: Bool):
         icon=String("sidebar.left"),
     ))
     v.append(MenuItem(String("Show in file tree"), FILE_TREE_REVEAL))
+    # Where the focused tool pane (or the last one focused) docks; its kind
+    # follows. The same choices as a right-click on the pane's header.
+    v.append(MenuItem.separator())
+    # (The icons are the native menu's; ``dock_edge_icon`` has them.)
+    v.append(MenuItem(
+        String("Dock Panel Left"), VIEW_DOCK_LEFT, checkable=True,
+        icon=dock_edge_icon(EDGE_LEFT),
+    ))
+    v.append(MenuItem(
+        String("Dock Panel Right"), VIEW_DOCK_RIGHT, checkable=True,
+        icon=dock_edge_icon(EDGE_RIGHT),
+    ))
+    v.append(MenuItem(
+        String("Dock Panel Top"), VIEW_DOCK_TOP, checkable=True,
+        icon=dock_edge_icon(EDGE_TOP),
+    ))
+    v.append(MenuItem(
+        String("Dock Panel Bottom"), VIEW_DOCK_BOTTOM, checkable=True,
+        icon=dock_edge_icon(EDGE_BOTTOM),
+    ))
     if native:
-        # Float the tool panels (terminal / debug / test) into a separate
-        # window — needs a host that owns windows.
+        # The floating panels' window needs a host that owns windows.
         v.append(MenuItem(
-            String("Floating panels"), TOGGLE_FLOATING_PANELS, checkable=True,
+            String("Float Panel"), VIEW_DOCK_FLOAT, checkable=True,
+            icon=dock_edge_icon(EDGE_FLOAT),
         ))
+    v.append(MenuItem(
+        String("Auto-hide Panel"), VIEW_DOCK_AUTO_HIDE, checkable=True,
+        icon=DOCK_AUTO_HIDE_ICON,
+    ))
+    if native:
+        v.append(MenuItem.separator())
         v.append(MenuItem(
             String("Floating git window"), TOGGLE_FLOATING_GIT, checkable=True,
         ))
@@ -313,10 +340,14 @@ def refresh_menu_visibility(mut d: Desktop):
     if not view_visible and d.project:
         view_visible = True
     d.menu_bar.set_visible_by_label(String("View"), view_visible)
-    # Keep the Floating-panels checkmark in lockstep with the live state.
-    # The Desktop owns the flag, the host owns the window; this is the one
-    # per-tick place both are reachable for the native menu snapshot.
-    d.menu_bar.set_item_checked(TOGGLE_FLOATING_PANELS, d.panels_detached)
+    # The Dock Panel checkmarks follow the pane they act on.
+    var dock = d.dock_menu_state()
+    d.menu_bar.set_item_checked(VIEW_DOCK_LEFT, dock[0] == Int(EDGE_LEFT))
+    d.menu_bar.set_item_checked(VIEW_DOCK_RIGHT, dock[0] == Int(EDGE_RIGHT))
+    d.menu_bar.set_item_checked(VIEW_DOCK_TOP, dock[0] == Int(EDGE_TOP))
+    d.menu_bar.set_item_checked(VIEW_DOCK_BOTTOM, dock[0] == Int(EDGE_BOTTOM))
+    d.menu_bar.set_item_checked(VIEW_DOCK_FLOAT, dock[0] == Int(EDGE_FLOAT))
+    d.menu_bar.set_item_checked(VIEW_DOCK_AUTO_HIDE, dock[1])
     d.menu_bar.set_item_checked(TOGGLE_FLOATING_GIT, not d.git_window_docked)
     var git_visible = is_editor
     if not git_visible and d.project:

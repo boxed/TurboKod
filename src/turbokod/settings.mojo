@@ -43,8 +43,12 @@ from .ui_tree import (
     UIDialog,
     UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_bool, ui_button,
     ui_buttons, ui_check, ui_choice, ui_dialog, ui_form, ui_hstack, ui_int,
-    ui_label, ui_page, ui_preview, ui_row, ui_table, ui_tabs, ui_text,
-    ui_vstack,
+    ui_dock_preview, ui_label, ui_page, ui_preview, ui_row, ui_spacer,
+    ui_table, ui_tabs, ui_text, ui_vstack,
+)
+from .window import (
+    EDGE_FLOAT, dock_order_edges, dock_order_spec, dock_spec, dock_spec_edge,
+    dock_spec_home, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP,
 )
 
 
@@ -54,6 +58,7 @@ comptime SECTION_FEATURES   = 2
 comptime SECTION_LANGUAGES  = 3
 comptime SECTION_SPELLING   = 4
 comptime SECTION_PROJECTS   = 5
+comptime SECTION_PANELS     = 6
 
 
 def _ls_keys() -> List[String]:
@@ -159,6 +164,10 @@ struct Settings(Movable, UIDialog):
     var selected_project_dir: Int
     var project_input: String
 
+    # Panels.
+    var dock_order_sel: Int
+    """The selected row of the edge order list."""
+
     def __init__(out self):
         self.active = False
         self.dirty = False
@@ -185,6 +194,7 @@ struct Settings(Movable, UIDialog):
         self.pending_dict_remove_lang = String("")
         self.selected_project_dir = -1
         self.project_input = String("")
+        self.dock_order_sel = 0
 
     def open(
         mut self, cfg: TurbokodConfig,
@@ -262,6 +272,7 @@ struct Settings(Movable, UIDialog):
         pages.append(ui_page(String("Languages"), self._languages_ui()))
         pages.append(ui_page(String("Spelling"), self._spelling_ui()))
         pages.append(ui_page(String("Projects"), self._projects_ui()))
+        pages.append(ui_page(String("Panels"), self._panels_ui()))
         var buttons = List[UINode]()
         buttons.append(ui_button(String("close"), String("Close"), UI_DEFAULT))
         var body = List[UINode]()
@@ -549,10 +560,138 @@ struct Settings(Movable, UIDialog):
         body.append(ui_hstack(add_row^))
         return ui_vstack(body^)
 
+    def _dock_kinds(self) -> List[Tuple[String, String, String, Bool]]:
+        """Each kind of tool panel: its label, its keys' suffix, where it
+        docks (a ``dock_spec``) and whether it auto-hides."""
+        var out = List[Tuple[String, String, String, Bool]]()
+        out.append((
+            String("Terminals"), String("terminal"), self.cfg.dock_terminal,
+            self.cfg.auto_hide_terminal,
+        ))
+        out.append((
+            String("Run / Debug"), String("debug"), self.cfg.dock_debug,
+            self.cfg.auto_hide_debug,
+        ))
+        out.append((
+            String("Tests"), String("test"), self.cfg.dock_test,
+            self.cfg.auto_hide_test,
+        ))
+        out.append((
+            String("Find Results"), String("find_results"),
+            self.cfg.dock_find_results, self.cfg.auto_hide_find_results,
+        ))
+        return out^
+
+    def _panels_ui(self) -> UINode:
+        """Where each kind of tool panel docks and whether it auto-hides,
+        and the order the edges cut the window in, over a miniature of
+        it."""
+        var edges = List[String]()
+        edges.append(String("Bottom"))
+        edges.append(String("Top"))
+        edges.append(String("Left"))
+        edges.append(String("Right"))
+        if self.offer_native_ui:
+            edges.append(String("Floating"))
+        var rows = List[UINode]()
+        for k in self._dock_kinds():
+            var edge = Int(dock_spec_edge(k[2]))
+            if edge >= len(edges):
+                edge = Int(dock_spec_home(k[2]))
+            var line = List[UINode]()
+            line.append(ui_choice(
+                String("dock_") + k[1], edges.copy(), edge,
+            ))
+            line.append(ui_check(
+                String("auto_hide_") + k[1], String("Auto-hide"), k[3],
+            ))
+            rows.append(ui_row(k[0], ui_hstack(line^)))
+        var order = dock_order_edges(self.cfg.dock_order)
+        var order_rows = List[List[String]]()
+        for i in range(len(order)):
+            order_rows.append([
+                String(i + 1) + String(". ") + _edge_label(order[i]),
+            ])
+        var moves = List[UINode]()
+        moves.append(ui_button(
+            String("dock_up"), String("Move Up"),
+            0 if self.dock_order_sel > 0 else UI_DISABLED,
+        ))
+        moves.append(ui_button(
+            String("dock_down"), String("Move Down"),
+            0 if self.dock_order_sel < len(order) - 1 else UI_DISABLED,
+        ))
+        moves.append(ui_spacer())
+        var order_line = List[UINode]()
+        order_line.append(ui_table(
+            String("dock_order"), [String("Edge")], order_rows^,
+            self.dock_order_sel, String(""), 4,
+        ))
+        order_line.append(ui_vstack(moves^))
+        order_line.append(ui_dock_preview(self.cfg.dock_order))
+        var body = List[UINode]()
+        body.append(ui_label(
+            String("Where each kind of panel docks. Auto-hide rolls it up "
+                + "when an editor gets the focus."),
+            UI_SECONDARY,
+        ))
+        body.append(ui_form(rows^))
+        body.append(ui_label(
+            String("The order the edges cut the window in: the first "
+                + "takes its whole side, the next fits beside it."),
+            UI_SECONDARY,
+        ))
+        body.append(ui_hstack(order_line^))
+        return ui_vstack(body^)
+
+    def _set_dock(mut self, suffix: String, value: String) -> Bool:
+        """A kind's dock choice (an ``EDGE_*``). Floating keeps the edge it
+        docked to as its home."""
+        var e = ui_int(value)
+        if e < 0 or e > Int(EDGE_FLOAT):
+            return False
+        var cur: String
+        if suffix == "terminal":
+            cur = self.cfg.dock_terminal
+        elif suffix == "debug":
+            cur = self.cfg.dock_debug
+        elif suffix == "test":
+            cur = self.cfg.dock_test
+        elif suffix == "find_results":
+            cur = self.cfg.dock_find_results
+        else:
+            return False
+        var spec = dock_spec(UInt8(e), dock_spec_home(cur))
+        if e != Int(EDGE_FLOAT):
+            spec = dock_spec(UInt8(e), UInt8(e))
+        if suffix == "terminal":
+            self.cfg.dock_terminal = spec^
+        elif suffix == "debug":
+            self.cfg.dock_debug = spec^
+        elif suffix == "test":
+            self.cfg.dock_test = spec^
+        else:
+            self.cfg.dock_find_results = spec^
+        return True
+
+    def _move_dock_edge(mut self, delta: Int):
+        """Move the selected edge of the order list up or down."""
+        var order = dock_order_edges(self.cfg.dock_order)
+        var i = self.dock_order_sel
+        var j = i + delta
+        if i < 0 or i >= len(order) or j < 0 or j >= len(order):
+            return
+        var t = order[i]
+        order[i] = order[j]
+        order[j] = t
+        self.cfg.dock_order = dock_order_spec(order)
+        self.dock_order_sel = j
+        self.dirty = True
+
     def ui_set(mut self, key: String, value: String):
         if key == String("section"):
             var s = ui_int(value, self.section)
-            if s >= 0 and s <= SECTION_PROJECTS:
+            if s >= 0 and s <= SECTION_PANELS:
                 self.section = s
             return
         if key == String("languages"):
@@ -572,6 +711,11 @@ struct Settings(Movable, UIDialog):
             return
         if key == String("project_input"):
             self.project_input = value
+            return
+        if key == String("dock_order"):
+            var s = ui_int(value, self.dock_order_sel)
+            if s >= 0 and s < 4:
+                self.dock_order_sel = s
             return
         # Everything below is a setting.
         if key == String("auto_save"):
@@ -594,6 +738,17 @@ struct Settings(Movable, UIDialog):
             self.cfg.cursor_blink = ui_bool(value)
         elif key == String("terminal_tmux"):
             self.cfg.terminal_tmux = ui_bool(value)
+        elif key.startswith(String("dock_")):
+            if not self._set_dock(String(key.removeprefix(String("dock_"))), value):
+                return
+        elif key == String("auto_hide_terminal"):
+            self.cfg.auto_hide_terminal = ui_bool(value)
+        elif key == String("auto_hide_debug"):
+            self.cfg.auto_hide_debug = ui_bool(value)
+        elif key == String("auto_hide_test"):
+            self.cfg.auto_hide_test = ui_bool(value)
+        elif key == String("auto_hide_find_results"):
+            self.cfg.auto_hide_find_results = ui_bool(value)
         elif key == String("look"):
             var i = ui_int(value)
             if i < 0 or i > 2:
@@ -617,6 +772,10 @@ struct Settings(Movable, UIDialog):
     def ui_act(mut self, id: String):
         if id == String("close"):
             self.close_requested = True
+        elif id == String("dock_up"):
+            self._move_dock_edge(-1)
+        elif id == String("dock_down"):
+            self._move_dock_edge(1)
         elif id == String("pick_font"):
             self.font_chooser.open(
                 id, String("Font"), self._font_names.copy(), self.font_choice,
@@ -857,3 +1016,13 @@ def _area_font_title(slot: Int) -> String:
     if slot == 3:
         return String("Debugger font")
     return String("UI font")
+
+
+def _edge_label(edge: UInt8) -> String:
+    if edge == EDGE_LEFT:
+        return String("Left")
+    if edge == EDGE_RIGHT:
+        return String("Right")
+    if edge == EDGE_TOP:
+        return String("Top")
+    return String("Bottom")

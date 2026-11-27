@@ -64,6 +64,10 @@ comptime UI_PREVIEW   = 15
 is the font label, ``number`` the font size (0 = its default), ``options``
 the built-in font labels, ``value`` a token that changes whenever the
 palette does (so a projector knows to repaint)."""
+comptime UI_DOCK_PREVIEW = 17
+"""A miniature of the docked edges cutting the window in the order
+``value`` (``config.dock_order``): every edge holding a panel, and the
+editors in what's left (``dock_preview_regions``)."""
 comptime UI_LIST      = 16
 """A list too long to send whole (Quick Open's files, a file's lines):
 ``count`` rows in all, of which ``rows`` holds the ones from ``first`` on —
@@ -482,6 +486,12 @@ def ui_preview(
     return n^
 
 
+def ui_dock_preview(var order: String) -> UINode:
+    var n = UINode(UI_DOCK_PREVIEW)
+    n.value = order^
+    return n^
+
+
 def ui_bool(value: String) -> Bool:
     """A checkbox's ``set`` value."""
     return value == String("1")
@@ -514,6 +524,7 @@ def _kind_name(kind: Int) -> String:
     if kind == UI_SEPARATOR: return String("separator")
     if kind == UI_PREVIEW: return String("preview")
     if kind == UI_LIST: return String("list")
+    if kind == UI_DOCK_PREVIEW: return String("dock_preview")
     return String("spacer")
 
 

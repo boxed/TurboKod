@@ -226,7 +226,7 @@ struct VScrollbar(ImplicitlyCopyable, Movable):
                 (self.x - canvas.origin.x) * SCALE_ONE,
                 (self.top - canvas.origin.y) * SCALE_ONE,
                 bar.width() * SCALE_ONE, bar.height() * SCALE_ONE, False, False,
-                y0, y0 + m.knob_size * SCALE_ONE, attr, 0,
+                y0, y0 + m.knob_size * SCALE_ONE, attr, 0, String(""),
             ))
             return
         for c in range(self.cells):
@@ -298,7 +298,7 @@ struct HScrollbar(ImplicitlyCopyable, Movable):
                 (self.left - canvas.origin.x) * SCALE_ONE,
                 (self.y - canvas.origin.y) * SCALE_ONE,
                 bar.width() * SCALE_ONE, bar.height() * SCALE_ONE, True, False,
-                x0, x0 + m.knob_size * SCALE_ONE, attr, 0,
+                x0, x0 + m.knob_size * SCALE_ONE, attr, 0, String(""),
             ))
             return
         for c in range(self.cells):

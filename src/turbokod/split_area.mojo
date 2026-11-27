@@ -20,7 +20,13 @@ it from its paint and mouse paths:
   pointer OSC in the terminal), so a split gets the right cursor in every
   look for free.
 * ``take_changed()`` is True once after a drag (or reset) moved the
-  divider, so the owner can remember ``fraction``.
+  divider, so the owner can remember ``fraction`` (or ``fixed_cells``).
+
+A split normally keeps a *share* of its area (``fraction``), so both halves
+grow with the window. In *fixed-cells* mode (``fixed_cells >= 0``) one half
+keeps a size in cells instead — the first, or the second with
+``fixed_second`` — and a drag writes back cells: a docked side column keeps
+its width when the window grows and the other half takes the difference.
 
 The divider paints through the palette slots (``PANE_FG`` / ``PANE_BG``,
 ``BORDER_FOCUS`` while dragged) like the rest of a tool pane, so a theme
@@ -65,13 +71,25 @@ struct SplitArea(Copyable, Movable):
     """Pointer's offset from the divider when the drag started, so the
     divider doesn't jump to the pointer."""
     var _changed: Bool
+    var fixed_cells: Int
+    """Fixed-cells mode when ``>= 0``: the size of the fixed half in cells
+    (the first, or the second when ``fixed_second``). ``-1`` splits by
+    ``fraction``."""
+    var default_cells: Int
+    """Where a double click puts a fixed-cells divider back."""
+    var fixed_second: Bool
+    """In fixed-cells mode, the size is the second half's."""
 
     def __init__(
         out self, fraction: Int = 500, min_first: Int = 1,
-        min_second: Int = 1,
+        min_second: Int = 1, fixed_cells: Int = -1,
+        fixed_second: Bool = False,
     ):
         self.fraction = fraction
         self.default_fraction = fraction
+        self.fixed_cells = fixed_cells
+        self.default_cells = fixed_cells
+        self.fixed_second = fixed_second
         self.min_first = min_first
         self.min_second = min_second
         self.side_by_side = True
@@ -116,7 +134,12 @@ struct SplitArea(Copyable, Movable):
         """Cells of the first half for an area ``span`` cells across (the
         divider takes one)."""
         var avail = span - 1
-        var first = (avail * self.fraction + SPLIT_SCALE // 2) // SPLIT_SCALE
+        var first: Int
+        if self.fixed_cells >= 0:
+            first = avail - self.fixed_cells if self.fixed_second \
+                else self.fixed_cells
+        else:
+            first = (avail * self.fraction + SPLIT_SCALE // 2) // SPLIT_SCALE
         # Minimums give way, the second's first, when the area is too
         # small for both.
         first = min(first, avail - min(self.min_second, avail - 1))
@@ -158,7 +181,7 @@ struct SplitArea(Copyable, Movable):
                 (r.a.x - canvas.origin.x) * SCALE_ONE,
                 (r.a.y - canvas.origin.y) * SCALE_ONE,
                 r.width() * SCALE_ONE, r.height() * SCALE_ONE,
-                self.side_by_side, self.dragging, 0, 0, blank, 0,
+                self.side_by_side, self.dragging, 0, 0, blank, 0, String(""),
             ))
             return
         var cell_attr = Attr(BORDER_FOCUS, attr.bg) if self.dragging else attr
@@ -194,6 +217,11 @@ struct SplitArea(Copyable, Movable):
                 or event.motion or not self.on_divider(event.pos):
             return False
         if event.click_count >= 2:
+            if self.fixed_cells >= 0:
+                if self.fixed_cells != self.default_cells:
+                    self.fixed_cells = self.default_cells
+                    self._changed = True
+                return True
             if self.fraction != self.default_fraction:
                 self.fraction = self.default_fraction
                 self._changed = True
@@ -213,6 +241,10 @@ struct SplitArea(Copyable, Movable):
         var first = at - lo
         var avail = span - 1
         first = max(min(self.min_first, avail - 1), min(first, avail - min(self.min_second, avail - 1)))
+        if self.fixed_cells >= 0:
+            self.fixed_cells = avail - first if self.fixed_second else first
+            self._div = lo + self._first_size(span)
+            return
         self.fraction = max(1, min(
             SPLIT_SCALE - 1, (first * SPLIT_SCALE + avail // 2) // avail,
         ))

@@ -375,7 +375,7 @@ struct TestResultsView(Copyable, Movable):
             kind, (r.a.x - grid.origin.x) * SCALE_ONE,
             (r.a.y - grid.origin.y) * SCALE_ONE,
             r.width() * SCALE_ONE, r.height() * SCALE_ONE, False, False,
-            0, 0, Attr(WHITE, PANE_BG), self.host_tag,
+            0, 0, Attr(WHITE, PANE_BG), self.host_tag, String(""),
         ))
 
     # --- the host's side (native looks) ---------------------------------

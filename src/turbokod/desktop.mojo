@@ -33,13 +33,13 @@ from .case_fold import eq_ci, fold_byte
 from .json import JsonValue, json_null
 from .output_links import OutputLink
 from .canvas import (
-    Canvas, HOST_SURFACES, HostItem, SCALE_ONE, SubGrid,
+    Canvas, HOST_DOCK_TAB, HOST_SURFACES, HostItem, SCALE_ONE, SubGrid,
 )
 from .cell import Cell, FONT_CODE, FONT_SLOTS, FONT_UI
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY,
-    PANE_BG, PANE_FG,
+    LIGHT_YELLOW, PANE_BG, PANE_FG,
 )
 from .theme import Theme, theme_by_name
 from .events import (
@@ -62,7 +62,9 @@ from .config import (
     config_file_stamp, default_font_label,
     load_config, lsp_overrides_equal, merge_config, record_recent_file,
     record_recent_project, save_config_merged, try_read_config,
+    DOCK_SIDE_COLS, DOCK_TOP_ROWS,
 )
+from .split_area import SplitArea
 from .diff import (
     DIFF_ROW_REMOVED, build_diff_rows, diff_row_emphasis_for,
     diff_row_partner,
@@ -224,7 +226,7 @@ from .run_manager import (
 )
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
-    byte_slice, display_columns, parse_int_prefix, parse_uint_range,
+    byte_slice, char_width, display_columns, parse_int_prefix, parse_uint_range,
     split_lines_no_trailing,
     shell_command, shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
     fnv_int, fnv_start, fnv_str, text_cells,
@@ -272,7 +274,11 @@ from .on_save_location import locate_on_save_error
 from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
     coalesce_dock_states, dock_coalesces,
-    PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
+    EDGE_BOTTOM, EDGE_COUNT, EDGE_FLOAT, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP,
+    DOCK_AUTO_HIDE_ICON, dock_edge_icon, dock_order_edges, dock_spec,
+    dock_spec_edge, dock_spec_home,
+    PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NONE,
+    PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
     close_button_clicked, compute_display_titles, hit_title_command,
     paint_attention_outline, paint_close_button,
@@ -395,6 +401,14 @@ comptime _PA_RENAME           = String("rename:do")
 # prompt (rename) and confirm dialog (delete) resolve against.
 comptime _TAB_FILE_ACTION_RENAME = 101
 comptime _TAB_FILE_ACTION_DELETE = 102
+# A tool pane's dock menu (``Desktop._open_dock_menu``), which shares the
+# tab popup.
+comptime _DOCK_MENU_LEFT = 201
+comptime _DOCK_MENU_RIGHT = 202
+comptime _DOCK_MENU_TOP = 203
+comptime _DOCK_MENU_BOTTOM = 204
+comptime _DOCK_MENU_FLOAT = 205
+comptime _DOCK_MENU_AUTO_HIDE = 206
 comptime _PA_RENAME_FILE      = String("file:rename")
 comptime _PA_DELETE_FILE      = String("file:delete")
 comptime _PA_DUPLICATE_FILE   = String("file:duplicate:do")
@@ -433,6 +447,14 @@ comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
 comptime VIEW_CLASSIC_UI           = String("view:classic_ui")
 comptime VIEW_NATIVE_UI            = String("view:native_ui")
 comptime VIEW_PLATINUM_UI          = String("view:platinum_ui")
+# View ▸ Dock Panel …: move the focused (or last focused) tool pane to an
+# edge, float it, or toggle its auto-hide. See docs/dock-edges.md.
+comptime VIEW_DOCK_LEFT            = String("view:dock_left")
+comptime VIEW_DOCK_RIGHT           = String("view:dock_right")
+comptime VIEW_DOCK_TOP             = String("view:dock_top")
+comptime VIEW_DOCK_BOTTOM          = String("view:dock_bottom")
+comptime VIEW_DOCK_FLOAT           = String("view:dock_float")
+comptime VIEW_DOCK_AUTO_HIDE       = String("view:dock_auto_hide")
 # View-menu toggle for the per-line "+/~" change-bar gutter. The flag
 # lives on ``TurbokodConfig`` so it survives across sessions; the
 # column itself only paints when a ``.git`` is reachable from the
@@ -1027,10 +1049,92 @@ struct PanelSlot(ImplicitlyCopyable, Movable):
     ``terminal_panes`` index for ``PANEL_KIND_TERMINAL`` (0 otherwise).
     ``rect`` is the panel's slice of the panel window, top-to-bottom in
     stack order. Both ``paint_panels`` and ``handle_panels_event`` walk
-    the same slot list so paint and hit-testing never disagree."""
+    the same slot list so paint and hit-testing never disagree.
+
+    ``edge`` is the ``EDGE_*`` the panel is laid out on: the bottom
+    stack's panels resize by their own header, the others (top, left,
+    right, floating) are a filling stack whose splitters the Desktop
+    drives (``_panels_drive_resize``)."""
     var kind: Int
     var idx: Int
     var rect: Rect
+    var edge: UInt8
+
+
+def dock_kind_of_panel(kind: Int) -> UInt8:
+    """The ``DOCK_*`` focus kind of a ``PANEL_KIND_*``."""
+    if kind == PANEL_KIND_TERMINAL:
+        return DOCK_TERMINAL
+    if kind == PANEL_KIND_DEBUG:
+        return DOCK_DEBUG_PANE
+    if kind == PANEL_KIND_FIND_RESULTS:
+        return DOCK_FIND_RESULTS_PANE
+    return DOCK_TEST_PANE
+
+
+def panel_kind_of_dock(kind: UInt8) -> Int:
+    """The ``PANEL_KIND_*`` of a tool pane's ``DOCK_*``, -1 for anything
+    else."""
+    if kind == DOCK_TERMINAL:
+        return PANEL_KIND_TERMINAL
+    if kind == DOCK_DEBUG_PANE:
+        return PANEL_KIND_DEBUG
+    if kind == DOCK_FIND_RESULTS_PANE:
+        return PANEL_KIND_FIND_RESULTS
+    if kind == DOCK_TEST_PANE:
+        return PANEL_KIND_TEST
+    return -1
+
+
+comptime DOCK_STRIP_COLS = 2
+"""Width of a side column whose panels are all rolled up: a strip of
+vertical tabs, one per panel (``Desktop._strip_tabs``)."""
+
+
+@fieldwise_init
+struct DockLayout(ImplicitlyCopyable, Movable):
+    """Where the docked edges sit in the project window
+    (``Desktop._dock_layout``). The file tree is outermost; then each edge
+    with panels on it cuts its region off what's left, in the order
+    ``config.dock_order`` ranks them: the first takes the full height (a
+    side) or width (top / bottom) of the window, the next fits beside it,
+    and so on. The default — left, right, top, bottom — gives the side
+    columns the full height, with the top region and the bottom stack
+    between them.
+
+    ``left`` / ``right`` / ``top`` are the regions' panel areas (empty
+    when no panel docks there). A side column whose panels are all rolled
+    up is a strip (``left_strip`` / ``right_strip``). ``*_split`` is the
+    area the region's ``SplitArea`` divides (empty when it has no
+    divider: no region, a strip, or a rolled-up top). ``mid`` is what's
+    left between the columns below the top region, down to the status
+    strip: the workspace.
+
+    ``bottom`` is the bottom stack's area (its x-span and bottom edge are
+    what the stack's panes are laid out against; it's empty-height while
+    nothing docks there), and ``bottom_avail`` the rows a maximized pane
+    there may fill."""
+    var left: Rect
+    var right: Rect
+    var top: Rect
+    var left_strip: Bool
+    var right_strip: Bool
+    var left_split: Rect
+    var right_split: Rect
+    var top_split: Rect
+    var mid: Rect
+    var bottom: Rect
+    var bottom_avail: Int
+
+    def area(self, edge: UInt8) -> Rect:
+        """The panel area of a stack ``edge`` (empty for a strip)."""
+        if edge == EDGE_LEFT:
+            return Rect.empty() if self.left_strip else self.left
+        if edge == EDGE_RIGHT:
+            return Rect.empty() if self.right_strip else self.right
+        if edge == EDGE_TOP:
+            return self.top
+        return Rect.empty()
 
 
 @fieldwise_init
@@ -1105,15 +1209,29 @@ struct Desktop(Movable):
     # would tear away from the text it sits on. Stays False for the terminal
     # frontend, which has no sub-cell scroll and keeps the classic baked shadow.
     var host_owns_shadows: Bool
-    # When True, the tool panels (terminal panes, debug pane, test pane) are
-    # rendered on a *separate* host window (the native "Floating panels"
-    # feature) instead of docked at the bottom of this Desktop's grid. The
-    # main surface (`paint` / `workspace_rect` / `handle_event`) then ignores
-    # them entirely — the editor area reclaims the bottom rows — and the host
-    # drives the second surface via `paint_panels` / `handle_panels_event`.
-    # Only ever set by a host frontend (the Swift app); the terminal frontend
-    # leaves it False and always renders docked. See docs/floating-panels.md.
-    var panels_detached: Bool
+    # When True, the host has a floating panels' window for this Desktop
+    # (the native app, in a display configuration where it has one), so a
+    # panel whose edge is ``EDGE_FLOAT`` renders there — the host drives
+    # that surface via `paint_panels` / `handle_panels_event`. False, such
+    # a panel docks to its ``home_edge`` (``effective_edge``). Only ever set
+    # by a host frontend; the terminal frontends leave it False. See
+    # docs/dock-edges.md and docs/floating-panels.md.
+    var float_allowed: Bool
+    # The dividers between the docked left / right columns and the top
+    # region and the workspace, sized in cells (``config.dock_*``).
+    var dock_split_left: SplitArea
+    var dock_split_right: SplitArea
+    var dock_split_top: SplitArea
+    # The tool pane the View menu's Dock items act on: the focused one, else
+    # the last one focused (``_focus_dock``). ``DOCK_NONE`` when none.
+    var _last_pane_kind: UInt8
+    var _last_pane_idx: Int
+    # The pane a header's right-click opened the dock menu for.
+    var _dock_menu_kind: UInt8
+    var _dock_menu_idx: Int
+    # ``key_target().kind`` as of the last ``_on_focus_change``: auto-hide
+    # fires when it turns to the editors.
+    var _last_key_kind: UInt8
     # True when this Desktop's host window currently owns the OS keyboard
     # focus (is the key window). Multiple projects each run their own
     # Desktop in their own native window; only the key one should animate
@@ -1246,7 +1364,7 @@ struct Desktop(Movable):
     # frontend) — the main surface then skips the in-grid settings overlay
     # and keeps routing events to the workspace, while the host drives the
     # second surface via ``paint_settings`` / ``handle_settings_event``.
-    # Mirrors ``panels_detached`` (see docs/floating-panels.md).
+    # Like the floating panels (see docs/floating-panels.md).
     var settings_detached: Bool
     var bg_pattern: String
     var bg_attr: Attr
@@ -1677,7 +1795,7 @@ struct Desktop(Movable):
     (File → New terminal pane / Cmd+Shift+T), so keyboard focus should
     land on it. The docked frontends already route keys to the focused
     pane in-process; this flag only matters when the tool panels float
-    on the macOS host's separate window (``panels_detached``), where the
+    on the macOS host's separate window (``EDGE_FLOAT``), where the
     auto-show poll deliberately ``orderFront``s without ``makeKey`` so a
     passively-reopened pane (e.g. tests spawning the debug pane) doesn't
     yank focus. An *explicit* new terminal does want focus, so the host
@@ -1691,17 +1809,22 @@ struct Desktop(Movable):
     ``orderFront``s on the empty→non-empty transition, so a restart while
     the window is already on screen (but buried behind other windows)
     wouldn't raise it. Matters only when the tool panels float on the
-    macOS host's separate window (``panels_detached``): the host drains
+    macOS host's separate window (``EDGE_FLOAT``): the host drains
     this via ``consume_panel_front_request`` and ``orderFront``s the panel
     window (not ``makeKey`` — focus stays where it is). Sibling of
     ``panel_focus_request``, which both raises *and* keys the window for a
     new terminal pane. The terminal frontend never reads it."""
+    var panels_float_request: Bool
+    """One-shot: a panel was just floated (``EDGE_FLOAT``) while the host
+    has no floating panels' window for this Desktop (``float_allowed`` is
+    False): the native host opens one. Drained by
+    ``take_panels_float_request``; the terminal frontends never float."""
     var main_focus_request: Bool
     """One-shot: a deliberate open-at-line (``open_file_at`` — an output-
     pane link click or the ``turbokod://`` command-line open) just landed
     the cursor in an editor, so the *main* host window should come to the
     front + key. Matters when the tool panels float on their own macOS
-    window (``panels_detached``) and a link click there would otherwise
+    window (``EDGE_FLOAT``) and a link click there would otherwise
     leave the editor's window behind the panels. The macOS host drains it
     via ``consume_main_focus_request``; the terminal frontend never reads
     it. Sibling of ``panel_focus_request`` (which raises the *panel*
@@ -2015,7 +2138,24 @@ struct Desktop(Movable):
         self.menu_bar = MenuBar()
         self.host_owns_menu = False
         self.host_owns_shadows = False
-        self.panels_detached = False
+        self.float_allowed = False
+        self.panels_float_request = False
+        self.dock_split_left = SplitArea(
+            min_first=12, min_second=20, fixed_cells=DOCK_SIDE_COLS,
+        )
+        self.dock_split_right = SplitArea(
+            min_first=20, min_second=12, fixed_cells=DOCK_SIDE_COLS,
+            fixed_second=True,
+        )
+        self.dock_split_top = SplitArea(
+            min_first=DOCK_MIN_HEIGHT, min_second=6,
+            fixed_cells=DOCK_TOP_ROWS,
+        )
+        self._last_pane_kind = DOCK_NONE
+        self._last_pane_idx = 0
+        self._dock_menu_kind = DOCK_NONE
+        self._dock_menu_idx = 0
+        self._last_key_kind = DOCK_NONE
         self.host_focused = True
         self.windows = WindowManager()
         self.status_bar = StatusBar()
@@ -2747,33 +2887,13 @@ struct Desktop(Movable):
         return 1
 
     def workspace_rect(self, screen: Rect) -> Rect:
-        """Floating-window area: between menu bar, status bar, and any docked
-        widgets. The file tree, when visible, eats space on its docked side
-        (right by default, left after one extra View-menu cycle); the
-        terminal panes and debug pane, when active, eat space at the bottom
-        (terminal stack on top of debug when both are up)."""
-        var left = 0
-        var right = screen.b.x
-        if self.file_tree.visible:
-            if self.file_tree.dock_left:
-                left += self.file_tree.width
-                if left > screen.b.x:
-                    left = screen.b.x
-            else:
-                right -= self.file_tree.width
-                if right < 0:
-                    right = 0
-        var bottom = screen.b.y - self._bottom_chrome_height(screen)
-        # When the panels float on a separate host window, they eat no rows
-        # here — the editor area grows into the space they used to occupy.
-        # The bottom chrome (status / tab strip) still belongs to this window.
-        if not self.panels_detached:
-            bottom = max(1, self._dock_slot_bottom(screen, _SLOT_TERMINALS)
-                         - self._terminal_stack_height(screen))
-        # Row 0 is normally reserved for the in-grid menu bar; when the
-        # host owns the menu, that row is free for the workspace.
-        var top = 0 if self.host_owns_menu else 1
-        return Rect(left, top, right, bottom)
+        """Floating-window area: between the menu bar, the status bar and
+        every docked widget. The file tree, when visible, eats space on its
+        docked side; docked panel columns on the left and right next to it;
+        a top region and the bottom stack between those (terminals on top
+        of debug on top of the test pane). Floating panels take none."""
+        var mid = self._dock_layout(screen).mid
+        return Rect(mid.a.x, mid.a.y, mid.b.x, max(mid.b.y, 1))
 
     # --- Native smooth-scroll support (macOS host only) -------------------
     # The Swift host renders editor content at a sub-cell pixel offset for
@@ -2994,36 +3114,251 @@ struct Desktop(Movable):
         pointer Y (fractional cell row). Returns False when none active."""
         return self.windows.v_scroll_drag_to_f(mouse_y)
 
+    # --- Dock edges ------------------------------------------------------
+    # Each tool panel docks to an edge of its own (``dock.edge``): the
+    # bottom stack (each panel its own height, its header the drag handle),
+    # or a filling stack on the top, left or right of the workspace, or in
+    # the floating panels' window. See docs/dock-edges.md.
+
+    def effective_edge(self, dock: BottomDockedPanel) -> UInt8:
+        """Where ``dock`` is laid out: its edge, except that a floating one
+        docks to its home edge while the host has no panel window for it
+        (``float_allowed``)."""
+        if dock.edge == EDGE_FLOAT and not self.float_allowed:
+            return dock.home_edge
+        return dock.edge
+
+    def _panel_edge(self, kind: Int, idx: Int) -> UInt8:
+        """``effective_edge`` of panel ``(kind, idx)``."""
+        return self.effective_edge(self._panel_dock(kind, idx))
+
+    def _is_floating(self, dock: BottomDockedPanel) -> Bool:
+        return self.effective_edge(dock) == EDGE_FLOAT
+
+    def _panel_visible(self, kind: Int, idx: Int) -> Bool:
+        if kind == PANEL_KIND_TERMINAL:
+            return idx >= 0 and idx < len(self.terminal_panes)
+        if kind == PANEL_KIND_DEBUG:
+            return self.debug_pane.visible
+        if kind == PANEL_KIND_FIND_RESULTS:
+            return self.find_results_pane.visible
+        return self.test_pane.visible
+
+    def _visible_panels(self) -> List[PanelSlot]:
+        """Every open tool panel, in stacking order (terminals, run/debug,
+        Find Results, test), on its effective edge, with no rect yet."""
+        var out = List[PanelSlot]()
+        for i in range(len(self.terminal_panes)):
+            out.append(PanelSlot(
+                PANEL_KIND_TERMINAL, i, Rect.empty(),
+                self.effective_edge(self.terminal_panes[i].dock),
+            ))
+        if self.debug_pane.visible:
+            out.append(PanelSlot(
+                PANEL_KIND_DEBUG, 0, Rect.empty(),
+                self.effective_edge(self.debug_pane.dock),
+            ))
+        if self.find_results_pane.visible:
+            out.append(PanelSlot(
+                PANEL_KIND_FIND_RESULTS, 0, Rect.empty(),
+                self.effective_edge(self.find_results_pane.dock),
+            ))
+        if self.test_pane.visible:
+            out.append(PanelSlot(
+                PANEL_KIND_TEST, 0, Rect.empty(),
+                self.effective_edge(self.test_pane.dock),
+            ))
+        return out^
+
+    def _edge_counts(self, edge: UInt8) -> Tuple[Int, Int, Int]:
+        """For the panels on ``edge``: how many, how many aren't rolled
+        up, and the rows their headers take."""
+        var n = 0
+        var open = 0
+        var headers = 0
+        for i in range(len(self.terminal_panes)):
+            ref dock = self.terminal_panes[i].dock
+            if self.effective_edge(dock) == edge:
+                n += 1
+                headers += dock.header_rows()
+                open += 0 if dock.is_minimized() else 1
+        if self.debug_pane.visible \
+                and self.effective_edge(self.debug_pane.dock) == edge:
+            n += 1
+            headers += self.debug_pane.dock.header_rows()
+            open += 0 if self.debug_pane.dock.is_minimized() else 1
+        if self.find_results_pane.visible \
+                and self.effective_edge(self.find_results_pane.dock) == edge:
+            n += 1
+            headers += self.find_results_pane.dock.header_rows()
+            open += 0 if self.find_results_pane.dock.is_minimized() else 1
+        if self.test_pane.visible \
+                and self.effective_edge(self.test_pane.dock) == edge:
+            n += 1
+            headers += self.test_pane.dock.header_rows()
+            open += 0 if self.test_pane.dock.is_minimized() else 1
+        return (n, open, headers)
+
+    def _dock_layout(self, screen: Rect) -> DockLayout:
+        """Lay the docked edges out in the project window: see
+        ``DockLayout``."""
+        var top = 0 if self.host_owns_menu else 1
+        var bottom = screen.b.y - self._bottom_chrome_height(screen)
+        if bottom < top:
+            bottom = top
+        var x0 = 0
+        var x1 = screen.b.x
+        if self.file_tree.visible:
+            if self.file_tree.dock_left:
+                x0 = min(self.file_tree.width, screen.b.x)
+            else:
+                x1 = max(0, screen.b.x - self.file_tree.width)
+        var y0 = top
+        var y1 = bottom
+        var out = DockLayout(
+            Rect.empty(), Rect.empty(), Rect.empty(), False, False,
+            Rect.empty(), Rect.empty(), Rect.empty(), Rect.empty(),
+            Rect.empty(), 0,
+        )
+        var bottom_done = False
+        var order = dock_order_edges(self.config.dock_order)
+        for edge in order:
+            if edge == EDGE_LEFT:
+                var c = self._edge_counts(EDGE_LEFT)
+                if c[0] == 0 or x1 <= x0:
+                    continue
+                if c[1] == 0:
+                    out.left = Rect(x0, y0, min(x0 + DOCK_STRIP_COLS, x1), y1)
+                    out.left_strip = True
+                    x0 = out.left.b.x
+                    continue
+                var area = Rect(x0, y0, x1, y1)
+                var h = self.dock_split_left.halves(area, True)
+                out.left = h[0]
+                if not h[1].is_empty():
+                    out.left_split = area
+                    x0 = h[1].a.x
+                else:
+                    x0 = x1
+            elif edge == EDGE_RIGHT:
+                var c = self._edge_counts(EDGE_RIGHT)
+                if c[0] == 0 or x1 <= x0:
+                    continue
+                if c[1] == 0:
+                    out.right = Rect(max(x0, x1 - DOCK_STRIP_COLS), y0, x1, y1)
+                    out.right_strip = True
+                    x1 = out.right.a.x
+                    continue
+                var area = Rect(x0, y0, x1, y1)
+                var h = self.dock_split_right.halves(area, True)
+                if not h[1].is_empty():
+                    out.right = h[1]
+                    out.right_split = area
+                    x1 = h[0].b.x
+                else:
+                    out.right = area
+                    x1 = x0
+            elif edge == EDGE_TOP:
+                var c = self._edge_counts(EDGE_TOP)
+                if c[0] == 0 or x1 <= x0:
+                    continue
+                if c[1] == 0:
+                    out.top = Rect(x0, y0, x1, min(y0 + c[2], y1))
+                    y0 = out.top.b.y
+                    continue
+                var area = Rect(x0, y0, x1, y1)
+                var h = self.dock_split_top.halves(area, False)
+                out.top = h[0]
+                if not h[1].is_empty():
+                    out.top_split = area
+                    y0 = h[1].a.y
+                else:
+                    y0 = y1
+            elif edge == EDGE_BOTTOM:
+                bottom_done = True
+                # The stack's panes keep a row of workspace (the menu
+                # row's, when the host owns the menu) above a maximized one.
+                var avail = y1 - max(1, y0)
+                var total = self._bottom_total(avail)
+                var t = max(max(1, y0), y1 - total) if total > 0 else y1
+                out.bottom = Rect(x0, t, max(x0, x1), y1)
+                out.bottom_avail = avail
+                y1 = t
+        if not bottom_done:
+            out.bottom = Rect(x0, y1, max(x0, x1), y1)
+            out.bottom_avail = y1 - max(1, y0)
+        out.mid = Rect(x0, y0, max(x0, x1), max(y0, y1))
+        return out
+
+    def _bottom_total(self, avail: Int) -> Int:
+        """Rows the bottom stack takes, with ``avail`` rows for a
+        maximized pane."""
+        var total = 0
+        for i in range(len(self.terminal_panes)):
+            if self._on_bottom(self.terminal_panes[i].dock):
+                total += self._bottom_dock_height(
+                    self.terminal_panes[i].dock, avail,
+                )
+        if self.debug_pane.visible and self._on_bottom(self.debug_pane.dock):
+            total += self._bottom_dock_height(self.debug_pane.dock, avail)
+        if self.find_results_pane.visible \
+                and self._on_bottom(self.find_results_pane.dock):
+            total += self._bottom_dock_height(self.find_results_pane.dock, avail)
+        if self.test_pane.visible and self._on_bottom(self.test_pane.dock):
+            total += self._bottom_dock_height(self.test_pane.dock, avail)
+        return total
+
+    def _bottom_dock_height(self, dock: BottomDockedPanel, avail: Int) -> Int:
+        """A bottom-stack pane's height: its own (``preferred_height``, or
+        its header rolled up), or, maximized, ``avail`` less the other
+        panes of the stack, which stay on screen beside it."""
+        if dock.is_minimized():
+            return dock.header_rows()
+        if not dock.is_maximized():
+            return dock.preferred_height
+        var h = avail
+        for i in range(len(self.terminal_panes)):
+            ref o = self.terminal_panes[i].dock
+            if self._on_bottom(o) and not o.is_maximized():
+                h -= self._bottom_dock_height(o, avail)
+        if self.debug_pane.visible and self._on_bottom(self.debug_pane.dock) \
+                and not self.debug_pane.dock.is_maximized():
+            h -= self._bottom_dock_height(self.debug_pane.dock, avail)
+        if self.find_results_pane.visible \
+                and self._on_bottom(self.find_results_pane.dock) \
+                and not self.find_results_pane.dock.is_maximized():
+            h -= self._bottom_dock_height(self.find_results_pane.dock, avail)
+        if self.test_pane.visible and self._on_bottom(self.test_pane.dock) \
+                and not self.test_pane.dock.is_maximized():
+            h -= self._bottom_dock_height(self.test_pane.dock, avail)
+        return max(h, DOCK_MIN_HEIGHT)
+
     def _panel_left(self, screen: Rect) -> Int:
-        """Left edge for the bottom-docked panes. The file tree runs
-        the full height of the workspace on its docked side, so the
-        panes give way horizontally rather than painting over it."""
-        if self.file_tree.visible and self.file_tree.dock_left:
-            var left = self.file_tree.width
-            if left > screen.b.x:
-                left = screen.b.x
-            return left
-        return 0
+        """Left edge of the bottom stack: past the file tree and a docked
+        left column, which run the full height of the workspace."""
+        return self._dock_layout(screen).bottom.a.x
 
     def _panel_right(self, screen: Rect) -> Int:
-        """Right edge for the bottom-docked panes — see ``_panel_left``."""
-        if self.file_tree.visible and not self.file_tree.dock_left:
-            var right = screen.b.x - self.file_tree.width
-            if right < 0:
-                right = 0
-            return right
-        return screen.b.x
+        """Right edge of the bottom stack — see ``_panel_left``."""
+        return self._dock_layout(screen).bottom.b.x
+
+    def _on_bottom(self, dock: BottomDockedPanel) -> Bool:
+        return self.effective_edge(dock) == EDGE_BOTTOM
 
     def _dock_slot_bottom(self, screen: Rect, slot: Int) -> Int:
         """Bottom edge of bottom-dock ``slot``: the status / tab strip,
         minus every visible pane stacked below it. Slots count up from
-        the strip — test, Find Results, run/debug, then the terminals."""
-        var bottom = screen.b.y - self._bottom_chrome_height(screen)
-        if slot > _SLOT_TEST and self.test_pane.visible:
+        the strip — test, Find Results, run/debug, then the terminals.
+        Only the panes docked at the bottom stack here."""
+        var bottom = self._dock_layout(screen).bottom.b.y
+        if slot > _SLOT_TEST and self.test_pane.visible \
+                and self._on_bottom(self.test_pane.dock):
             bottom -= self._test_pane_height(screen)
-        if slot > _SLOT_FIND and self.find_results_pane.visible:
+        if slot > _SLOT_FIND and self.find_results_pane.visible \
+                and self._on_bottom(self.find_results_pane.dock):
             bottom -= self._find_results_pane_height(screen)
-        if slot > _SLOT_DEBUG and self.debug_pane.visible:
+        if slot > _SLOT_DEBUG and self.debug_pane.visible \
+                and self._on_bottom(self.debug_pane.dock):
             bottom -= self._debug_pane_height(screen)
         return bottom
 
@@ -3037,22 +3372,31 @@ struct Desktop(Movable):
         return Rect(self._panel_left(screen), top,
                     self._panel_right(screen), bottom)
 
+    def _slot_rect(self, screen: Rect, kind: Int, idx: Int) -> Rect:
+        """The rect of panel ``(kind, idx)`` on the project window, on
+        whatever edge it docks to; empty while it's hidden, floating, or
+        rolled up into a side strip."""
+        var slots = self._dock_slots(screen)
+        for ref s in slots:
+            if s.kind == kind and s.idx == idx:
+                return s.rect
+        return Rect.empty()
+
     def debug_pane_rect(self, screen: Rect) -> Rect:
-        """Where the bottom-docked run/debug pane lives — above the
-        status bar (and the tab bar, when visible) and above the test
-        pane when that's also up. The status / tab strip always sits at
-        the screen's bottom edge; the test pane (when visible) sits just
-        above it, and the run/debug pane stacks above the test pane."""
-        if not self.debug_pane.visible:
-            return Rect.empty()
+        """Where the run/debug pane lives on the project window (see
+        ``_slot_rect``). At the bottom it sits above the test and Find
+        Results panes, which sit on the status / tab strip."""
+        return self._slot_rect(screen, PANEL_KIND_DEBUG, 0)
+
+    def _bottom_debug_rect(self, screen: Rect) -> Rect:
         return self._dock_pane_rect(
             screen, _SLOT_DEBUG, self._debug_pane_height(screen),
         )
 
     def _coalesce_dock_states(mut self):
-        """At most one maximized pane in the bottom dock, the others
+        """At most one maximized pane per edge, the others there
         minimized beside it (see ``coalesce_dock_states``). Runs each
-        frame before layout, over the visible panes, top to bottom."""
+        frame before layout, over the visible panes, edge by edge."""
         # Nearly every frame there is nothing to coalesce — no pane
         # maximized, yielded or acknowledged — and copying each dock out
         # and back (its command and hit lists with it) is all this did.
@@ -3068,70 +3412,73 @@ struct Desktop(Movable):
                 pending = True
         if not pending:
             return
-        var docks = List[BottomDockedPanel]()
-        for i in range(len(self.terminal_panes)):
-            docks.append(self.terminal_panes[i].dock.copy())
-        if self.debug_pane.visible:
-            docks.append(self.debug_pane.dock.copy())
-        if self.find_results_pane.visible:
-            docks.append(self.find_results_pane.dock.copy())
-        if self.test_pane.visible:
-            docks.append(self.test_pane.dock.copy())
-        coalesce_dock_states(docks)
-        var k = 0
-        for i in range(len(self.terminal_panes)):
-            self.terminal_panes[i].dock = docks[k].copy()
-            k += 1
-        if self.debug_pane.visible:
-            self.debug_pane.dock = docks[k].copy()
-            k += 1
-        if self.find_results_pane.visible:
-            self.find_results_pane.dock = docks[k].copy()
-            k += 1
-        if self.test_pane.visible:
-            self.test_pane.dock = docks[k].copy()
+        var panels = self._visible_panels()
+        for e in range(EDGE_COUNT):
+            var docks = List[BottomDockedPanel]()
+            for ref p in panels:
+                if Int(p.edge) == e:
+                    docks.append(self._panel_dock(p.kind, p.idx).copy())
+            if len(docks) == 0:
+                continue
+            coalesce_dock_states(docks)
+            var k = 0
+            for ref p in panels:
+                if Int(p.edge) == e:
+                    self._set_panel_dock(p.kind, p.idx, docks[k].copy())
+                    k += 1
+
+    def _set_panel_dock(mut self, kind: Int, idx: Int, var dock: BottomDockedPanel):
+        if kind == PANEL_KIND_TERMINAL:
+            self.terminal_panes[idx].dock = dock^
+        elif kind == PANEL_KIND_DEBUG:
+            self.debug_pane.dock = dock^
+        elif kind == PANEL_KIND_FIND_RESULTS:
+            self.find_results_pane.dock = dock^
+        else:
+            self.test_pane.dock = dock^
 
     def _dock_height(
         self, dock: BottomDockedPanel, screen: Rect, chrome: Int,
     ) -> Int:
-        """``dock``'s rendered height in the stack: its own
+        """``dock``'s rendered height in its stack: its own
         ``effective_height``, except that a maximized pane leaves room
-        for the other visible panes (minimized beside it) so they stay
-        on screen."""
+        for the other visible panes on its edge (minimized beside it) so
+        they stay on screen. A maximized pane at the bottom fills up to
+        the top region, when there is one."""
         var h = dock.effective_height(screen, chrome)
         if not dock.is_maximized():
             return h
-        for i in range(len(self.terminal_panes)):
-            if not self.terminal_panes[i].dock.is_maximized():
-                h -= self.terminal_panes[i].dock.effective_height(
-                    screen, chrome,
-                )
-        if self.debug_pane.visible and not self.debug_pane.dock.is_maximized():
-            h -= self.debug_pane.dock.effective_height(screen, chrome)
-        if self.find_results_pane.visible \
-                and not self.find_results_pane.dock.is_maximized():
-            h -= self.find_results_pane.dock.effective_height(screen, chrome)
-        if self.test_pane.visible and not self.test_pane.dock.is_maximized():
-            h -= self.test_pane.dock.effective_height(screen, chrome)
+        var edge = self.effective_edge(dock)
+        if edge == EDGE_BOTTOM and chrome > 0:
+            return self._bottom_dock_height(
+                dock, self._dock_layout(screen).bottom_avail,
+            )
+        var panels = self._visible_panels()
+        for ref p in panels:
+            if p.edge != edge:
+                continue
+            ref other = self._panel_dock(p.kind, p.idx)
+            if not other.is_maximized():
+                h -= other.effective_height(screen, chrome)
         return max(h, DOCK_MIN_HEIGHT)
 
     def _debug_pane_height(self, screen: Rect) -> Int:
-        """Effective rendered height for the debug pane, considering
-        its window state. NORMAL → ``preferred_height`` (user's drag
-        target). MINIMIZED → 1 (header row only). MAXIMIZED → fill the
-        whole bottom area, leaving just the menu bar above and the
-        status / tab strip below."""
+        """Effective rendered height for the debug pane at the bottom,
+        considering its window state. NORMAL → ``preferred_height`` (the
+        user's drag target). MINIMIZED → its header. MAXIMIZED → fill the
+        whole bottom area, leaving the menu bar (or the top region) above
+        and the status / tab strip below."""
         return self._dock_height(
             self.debug_pane.dock, screen, self._bottom_chrome_height(screen),
         )
 
     def test_pane_rect(self, screen: Rect) -> Rect:
-        """Where the bottom-docked test pane lives — the bottom-most
-        docked pane, sitting directly above the status / tab strip with
-        the run/debug pane (and terminal stack) above it. Mirrors
-        ``debug_pane_rect`` so the two output panes read as a stack."""
-        if not self.test_pane.visible:
-            return Rect.empty()
+        """Where the test pane lives on the project window (see
+        ``_slot_rect``). At the bottom it's the bottom-most docked pane,
+        directly on the status / tab strip."""
+        return self._slot_rect(screen, PANEL_KIND_TEST, 0)
+
+    def _bottom_test_rect(self, screen: Rect) -> Rect:
         return self._dock_pane_rect(
             screen, _SLOT_TEST, self._test_pane_height(screen),
         )
@@ -3144,37 +3491,54 @@ struct Desktop(Movable):
         )
 
     def _bottom_pane_term_size(self) -> Tuple[Int, Int]:
-        """Terminal ``(cols, rows)`` to advertise to a child process
-        whose output streams into a full-width bottom-docked pane
-        (run / test). Children spawned by ``RunSession`` run on a pipe,
-        not a pty, so they can't query the kernel for a window size and
-        fall back to 80×24 — we instead export ``COLUMNS``/``LINES`` at
-        spawn (see ``RunSession.start``) so e.g. pytest wraps to the
-        pane width.
+        """Terminal ``(cols, rows)`` to advertise to a child process whose
+        output streams into the run/debug pane. Children spawned by
+        ``RunSession`` run on a pipe, not a pty, so they can't query the
+        kernel for a window size and fall back to 80×24 — we instead
+        export ``COLUMNS``/``LINES`` at spawn (see ``RunSession.start``)
+        so e.g. pytest wraps to the pane width.
 
-        Width mirrors the output ``TextLog`` rect in ``DebugPane.paint``
-        (left margin of 2, right scrollbar column reserved → pane width
-        minus 3). Sized off the last painted screen; returns ``(0, 0)``
+        Sized off the pane's rect in the last painted screen, wherever it
+        docks (the floating window's size isn't known here, so a floating
+        pane advertises what it would have docked): width minus the left
+        margin of 2 and the scrollbar column (``DebugPane.paint``), height
+        minus the title row and the chrome around the body. While the
+        pane isn't open, it's sized as if it were. Returns ``(0, 0)``
         before the first paint so callers leave the env unset and the
         child keeps its own default."""
         var screen = self._last_screen
         if screen.is_empty():
             return (0, 0)
-        var cols = (self._panel_right(screen) - self._panel_left(screen)) - 3
-        # Output region height: pane height minus the title row and the
-        # one-row top/bottom chrome the dock paints around the body.
-        var rows = self._test_pane_height(screen) - 2
+        var rect = self.debug_pane_rect(screen)
+        var cols: Int
+        var rows: Int
+        if rect.is_empty():
+            var layout = self._dock_layout(screen)
+            var edge = self.effective_edge(self.debug_pane.dock)
+            var area = layout.area(edge)
+            if edge == EDGE_BOTTOM or edge == EDGE_FLOAT or area.is_empty():
+                cols = layout.bottom.width() - 3
+                rows = self._dock_height(
+                    self.debug_pane.dock, screen,
+                    self._bottom_chrome_height(screen),
+                ) - 2
+            else:
+                cols = area.width() - 3
+                rows = area.height() - 2
+        else:
+            cols = rect.width() - 3
+            rows = rect.height() - 2
         if cols < 1 or rows < 1:
             return (0, 0)
         return (cols, rows)
 
     def find_results_pane_rect(self, screen: Rect) -> Rect:
-        """Where the bottom-docked Find Results pane lives — directly
-        above the test pane (when that's up) and the status / tab strip,
-        with the run/debug pane and terminal stack above it. Mirrors
-        ``test_pane_rect`` so the panes read as one stack."""
-        if not self.find_results_pane.visible:
-            return Rect.empty()
+        """Where the Find Results pane lives on the project window (see
+        ``_slot_rect``). At the bottom it sits directly above the test
+        pane (when that's up) and the status / tab strip."""
+        return self._slot_rect(screen, PANEL_KIND_FIND_RESULTS, 0)
+
+    def _bottom_find_rect(self, screen: Rect) -> Rect:
         return self._dock_pane_rect(
             screen, _SLOT_FIND, self._find_results_pane_height(screen),
         )
@@ -3188,10 +3552,15 @@ struct Desktop(Movable):
         )
 
     def terminal_pane_rect(self, screen: Rect, idx: Int) -> Rect:
-        """Where ``terminal_panes[idx]`` paints. Each pane in the stack
-        gets its own slice; pane 0 sits on top, the last pane sits
-        just above the debug pane (when visible) and the status / tab
-        strip at the very bottom.
+        """Where ``terminal_panes[idx]`` paints on the project window (see
+        ``_slot_rect``). In the bottom stack pane 0 sits on top, the last
+        one just above the debug pane (when visible) and the status / tab
+        strip at the very bottom."""
+        return self._slot_rect(screen, PANEL_KIND_TERMINAL, idx)
+
+    def _bottom_terminal_rect(self, screen: Rect, idx: Int) -> Rect:
+        """``terminal_panes[idx]``'s slice of the bottom stack: each
+        bottom terminal gets its own, in list order.
 
         Returns an empty rect when the index is out of range or the
         available space is too small for the panel."""
@@ -3211,7 +3580,10 @@ struct Desktop(Movable):
         # Walk from the top down to idx, accumulating heights.
         var y = stack_top
         for i in range(idx):
-            y += self._dock_height(self.terminal_panes[i].dock, screen, chrome)
+            if self._on_bottom(self.terminal_panes[i].dock):
+                y += self._dock_height(
+                    self.terminal_panes[i].dock, screen, chrome,
+                )
         var h = self._dock_height(self.terminal_panes[idx].dock, screen, chrome)
         var top = y
         var bottom = y + h
@@ -3223,18 +3595,16 @@ struct Desktop(Movable):
                     self._panel_right(screen), bottom)
 
     def _terminal_stack_height(self, screen: Rect) -> Int:
-        """Sum of ``effective_height`` across every terminal pane.
-        Zero when the list is empty — the workspace then reclaims
-        that row range."""
-        var n = len(self.terminal_panes)
-        if n == 0:
-            return 0
+        """Sum of ``effective_height`` across every terminal pane in the
+        bottom stack. Zero when there is none — the workspace then
+        reclaims that row range."""
         var chrome = self._bottom_chrome_height(screen)
         var total = 0
-        for i in range(n):
-            total += self._dock_height(
-                self.terminal_panes[i].dock, screen, chrome,
-            )
+        for i in range(len(self.terminal_panes)):
+            if self._on_bottom(self.terminal_panes[i].dock):
+                total += self._dock_height(
+                    self.terminal_panes[i].dock, screen, chrome,
+                )
         return total
 
     def drop_text_on_pane(
@@ -3457,7 +3827,7 @@ struct Desktop(Movable):
 
     # --- Floating-panels surface ------------------------------------------
     #
-    # When `panels_detached` is set, the host renders the tool panels on a
+    # Panels whose edge is `EDGE_FLOAT` the host renders on a
     # second window via `paint_panels` and feeds its events through
     # `handle_panels_event`. The panels own that window's whole grid (no menu,
     # no file tree, no status strip to work around), so they get a fresh
@@ -3465,45 +3835,66 @@ struct Desktop(Movable):
     # surface uses. See docs/floating-panels.md.
 
     def panels_visible_count(self) -> Int:
-        """How many tool panels are currently open (terminal + debug + test
-        + find results).
+        """How many tool panels are open in the floating panels' window.
 
-        Drives the native host's auto-hide of the floating panel window: when
-        this drops to zero the host orders the window out, and shows it again
-        when a panel reopens. See docs/floating-panels.md."""
-        var n = len(self.terminal_panes)
-        if self.debug_pane.visible:
-            n += 1
-        if self.test_pane.visible:
-            n += 1
-        if self.find_results_pane.visible:
-            n += 1
+        Drives the native host's auto-hide of that window: when this drops
+        to zero the host orders the window out, and shows it again when a
+        floating panel opens. See docs/floating-panels.md."""
+        var n = 0
+        var panels = self._visible_panels()
+        for ref p in panels:
+            if p.edge == EDGE_FLOAT:
+                n += 1
         return n
 
     def _dock_slots(self, screen: Rect) -> List[PanelSlot]:
-        """The main window's docked tool panes and their rects (empty
-        while hidden), in paint and hit-test order: the terminals, then the
-        run/debug, find-results and test panes. Their rects don't overlap,
-        so the order only decides who paints first. The floating-panels
-        window's counterpart is ``_panel_window_slots``."""
+        """The project window's docked tool panes and their rects, in
+        paint and hit-test order: the bottom stack (the terminals, then
+        the run/debug, Find Results and test panes, each with an empty
+        rect while hidden), then the top, left and right edges' stacks.
+        A panel rolled up into a side strip has an empty rect (its tab is
+        a ``_strip_tabs`` entry). Their rects don't overlap, so the order
+        only decides who paints first. The floating-panels window's
+        counterpart is ``_panel_window_slots``."""
         var slots = List[PanelSlot]()
         for i in range(len(self.terminal_panes)):
+            if self._on_bottom(self.terminal_panes[i].dock):
+                slots.append(PanelSlot(
+                    PANEL_KIND_TERMINAL, i,
+                    self._bottom_terminal_rect(screen, i), EDGE_BOTTOM,
+                ))
+        if not self.debug_pane.visible or self._on_bottom(self.debug_pane.dock):
             slots.append(PanelSlot(
-                PANEL_KIND_TERMINAL, i, self.terminal_pane_rect(screen, i),
+                PANEL_KIND_DEBUG, 0,
+                self._bottom_debug_rect(screen) if self.debug_pane.visible
+                    else Rect.empty(),
+                EDGE_BOTTOM,
             ))
-        slots.append(PanelSlot(PANEL_KIND_DEBUG, 0, self.debug_pane_rect(screen)))
-        slots.append(PanelSlot(
-            PANEL_KIND_FIND_RESULTS, 0, self.find_results_pane_rect(screen),
-        ))
-        slots.append(PanelSlot(PANEL_KIND_TEST, 0, self.test_pane_rect(screen)))
+        if not self.find_results_pane.visible \
+                or self._on_bottom(self.find_results_pane.dock):
+            slots.append(PanelSlot(
+                PANEL_KIND_FIND_RESULTS, 0,
+                self._bottom_find_rect(screen)
+                    if self.find_results_pane.visible else Rect.empty(),
+                EDGE_BOTTOM,
+            ))
+        if not self.test_pane.visible or self._on_bottom(self.test_pane.dock):
+            slots.append(PanelSlot(
+                PANEL_KIND_TEST, 0,
+                self._bottom_test_rect(screen) if self.test_pane.visible
+                    else Rect.empty(),
+                EDGE_BOTTOM,
+            ))
+        var layout = self._dock_layout(screen)
+        for e in [EDGE_TOP, EDGE_LEFT, EDGE_RIGHT]:
+            var es = self._edge_slots(e, layout.area(e), screen)
+            for ref s in es:
+                slots.append(s)
         return slots^
 
     def _surface_slots(self, screen: Rect, panels: Bool) -> List[PanelSlot]:
         """The tool panes one surface shows: the floating-panels window's
-        (``panels``) or the main window's — none on the surface the panes
-        aren't on."""
-        if panels != self.panels_detached:
-            return List[PanelSlot]()
+        (``panels``) or the project window's."""
         if panels:
             return self._panel_window_slots(screen)
         return self._dock_slots(screen)
@@ -3518,13 +3909,23 @@ struct Desktop(Movable):
         return -1
 
     def _panel_window_slots(self, screen: Rect) -> List[PanelSlot]:
-        """Placement of every visible tool panel inside the panel window.
+        """Placement of every floating panel inside the panel window: the
+        ``EDGE_FLOAT`` stack, filling the window (or, in the Turbo Vision
+        look, the inside of its frame of cells, ``_panels_area``)."""
+        return self._edge_slots(EDGE_FLOAT, self._panels_area(screen), screen)
 
-        Order: terminal panes (top), then the run/debug pane, then the test
-        pane (bottom). Each takes its ``dock.effective_height`` (with no
-        bottom chrome, against the panel window); the maximized panel, else
-        the **last non-minimized** one, absorbs any leftover rows so the window is always fully used,
-        and an overflowing stack clamps later panels to whatever fits.
+    def _edge_slots(
+        self, edge: UInt8, area: Rect, screen: Rect,
+    ) -> List[PanelSlot]:
+        """Placement of every visible panel on a stack ``edge`` (top, left,
+        right, floating) inside ``area``, top to bottom.
+
+        Order: terminal panes (top), then the run/debug pane, then Find
+        Results, then the test pane (bottom). Each takes its
+        ``dock.effective_height`` (with no bottom chrome); the maximized
+        panel, else the **last non-minimized** one, absorbs any leftover
+        rows so the area is always fully used, and an overflowing stack
+        clamps later panels to whatever fits.
 
         The absorber is the last *non-minimized* panel rather than simply
         the last one: a minimized panel must keep its single header row even
@@ -3535,44 +3936,29 @@ struct Desktop(Movable):
         the others leave, including one dragged open beside it
         (``BottomDockedPanel.kept_open``).
 
-        In the Turbo Vision look the window has a frame of cells
-        (``_paint_panels_frame``) and the stack fills the inside of it
-        (``_panels_area``)."""
-        var area = self._panels_area(screen)
+        An empty ``area`` (a side column rolled up into its strip) gives
+        every panel an empty rect."""
         var slots = List[PanelSlot]()
         var kinds = List[Int]()
         var idxs = List[Int]()
         var heights = List[Int]()
         var minimized = List[Bool]()
-        for i in range(len(self.terminal_panes)):
-            kinds.append(PANEL_KIND_TERMINAL)
-            idxs.append(i)
-            heights.append(
-                self._dock_height(self.terminal_panes[i].dock, screen, 0),
-            )
-            minimized.append(self.terminal_panes[i].dock.is_minimized())
-        if self.debug_pane.visible:
-            kinds.append(PANEL_KIND_DEBUG)
-            idxs.append(0)
-            heights.append(self._dock_height(self.debug_pane.dock, screen, 0))
-            minimized.append(self.debug_pane.dock.is_minimized())
-        if self.find_results_pane.visible:
-            kinds.append(PANEL_KIND_FIND_RESULTS)
-            idxs.append(0)
-            heights.append(
-                self._dock_height(self.find_results_pane.dock, screen, 0),
-            )
-            minimized.append(self.find_results_pane.dock.is_minimized())
-        if self.test_pane.visible:
-            kinds.append(PANEL_KIND_TEST)
-            idxs.append(0)
-            heights.append(self._dock_height(self.test_pane.dock, screen, 0))
-            minimized.append(self.test_pane.dock.is_minimized())
+        var panels = self._visible_panels()
+        for ref p in panels:
+            if p.edge != edge:
+                continue
+            ref dock = self._panel_dock(p.kind, p.idx)
+            kinds.append(p.kind)
+            idxs.append(p.idx)
+            heights.append(self._dock_height(dock, screen, 0))
+            minimized.append(dock.is_minimized())
         var n = len(kinds)
         if n > 0:
             # Pick the absorber: the last panel that isn't minimized. If
-            # every panel is minimized, the last one absorbs (so the window
+            # every panel is minimized, the last one absorbs (so the area
             # still fills) — there's no non-minimized panel to hand it to.
+            # A rolled-up top region is only as tall as its headers, so
+            # there that changes nothing.
             var absorber = n - 1
             var j = n - 1
             while j >= 0:
@@ -3597,14 +3983,429 @@ struct Desktop(Movable):
             var bottom = top + heights[i]
             if bottom > area.b.y:
                 bottom = area.b.y
-            if top >= bottom:
-                slots.append(PanelSlot(kinds[i], idxs[i], Rect.empty()))
+            if area.is_empty() or top >= bottom:
+                slots.append(PanelSlot(kinds[i], idxs[i], Rect.empty(), edge))
             else:
                 slots.append(PanelSlot(
                     kinds[i], idxs[i], Rect(area.a.x, top, area.b.x, bottom),
+                    edge,
                 ))
             y = bottom
         return slots^
+
+    def _strip_tabs(self, screen: Rect) -> List[PanelSlot]:
+        """The tabs of the side columns rolled up into strips: one per
+        panel, its title running down the strip, top to bottom in stack
+        order with a row between tabs. A click on one brings its panel
+        back (``_reveal_panel``). Tabs that don't fit are left off."""
+        var out = List[PanelSlot]()
+        var layout = self._dock_layout(screen)
+        for e in [EDGE_LEFT, EDGE_RIGHT]:
+            var strip = layout.left if e == EDGE_LEFT else layout.right
+            var is_strip = layout.left_strip if e == EDGE_LEFT \
+                else layout.right_strip
+            if not is_strip or strip.is_empty():
+                continue
+            var y = strip.a.y
+            var panels = self._visible_panels()
+            for ref p in panels:
+                if p.edge != e:
+                    continue
+                var rows = display_columns(self._panel_title(p.kind, p.idx)) + 2
+                rows = max(3, min(rows, 24))
+                var bottom = min(y + rows, strip.b.y)
+                if bottom - y < 3:
+                    break
+                out.append(PanelSlot(
+                    p.kind, p.idx, Rect(strip.a.x, y, strip.b.x, bottom), e,
+                ))
+                y = bottom + 1
+        return out^
+
+    def _panel_title(self, kind: Int, idx: Int) -> String:
+        """A panel's header title."""
+        if kind == PANEL_KIND_TERMINAL:
+            return self.terminal_panes[idx].header_title()
+        if kind == PANEL_KIND_DEBUG:
+            return self.debug_pane.header_title()
+        if kind == PANEL_KIND_FIND_RESULTS:
+            return self.find_results_pane.header_title()
+        return self.test_pane.header_title()
+
+    def _sync_dock_sizes(mut self):
+        """Put the docked edges' dividers where the config says, unless
+        one is being dragged (it then writes the config on release)."""
+        if not self.dock_split_left.dragging:
+            self.dock_split_left.fixed_cells = self.config.dock_left_cols
+        if not self.dock_split_right.dragging:
+            self.dock_split_right.fixed_cells = self.config.dock_right_cols
+        if not self.dock_split_top.dragging:
+            self.dock_split_top.fixed_cells = self.config.dock_top_rows
+
+    def _paint_dock_edges(mut self, mut canvas: Canvas, screen: Rect):
+        """The docked edges' dividers against the workspace (remembered
+        for hit-testing) and the side strips' tabs."""
+        var layout = self._dock_layout(screen)
+        if layout.left_split.is_empty():
+            self.dock_split_left.hide()
+        else:
+            _ = self.dock_split_left.layout(layout.left_split, True)
+            self.dock_split_left.paint(canvas)
+        if layout.right_split.is_empty():
+            self.dock_split_right.hide()
+        else:
+            _ = self.dock_split_right.layout(layout.right_split, True)
+            self.dock_split_right.paint(canvas)
+        if layout.top_split.is_empty():
+            self.dock_split_top.hide()
+        else:
+            _ = self.dock_split_top.layout(layout.top_split, False)
+            self.dock_split_top.paint(canvas)
+        if layout.left_strip and not layout.left.is_empty():
+            Painter(layout.left).fill(
+                canvas, layout.left, String(" "), Attr(PANE_FG, PANE_BG),
+            )
+        if layout.right_strip and not layout.right.is_empty():
+            Painter(layout.right).fill(
+                canvas, layout.right, String(" "), Attr(PANE_FG, PANE_BG),
+            )
+        var tabs = self._strip_tabs(screen)
+        for ref t in tabs:
+            self._paint_strip_tab(canvas, t)
+
+    def _paint_strip_tab(self, mut canvas: Canvas, t: PanelSlot):
+        """One vertical tab of a side strip: its panel's title running
+        down the strip, a glyph a row, between a rule above and below.
+        In the looks whose host draws chrome, a ``HOST_DOCK_TAB`` item
+        over blank cells (the cells keep the mouse)."""
+        ref dock = self._panel_dock(t.kind, t.idx)
+        var focused = self._panel_focused(t.kind, t.idx)
+        var attr = Attr(LIGHT_YELLOW, PANE_BG) if focused \
+            else Attr(PANE_FG, PANE_BG)
+        var title = self._panel_title(t.kind, t.idx)
+        var painter = Painter(t.rect)
+        painter.fill(canvas, t.rect, String(" "), Attr(PANE_FG, PANE_BG))
+        if canvas.host_widgets:
+            canvas.add_host_item(HostItem(
+                HOST_DOCK_TAB,
+                (t.rect.a.x - canvas.origin.x) * SCALE_ONE,
+                (t.rect.a.y - canvas.origin.y) * SCALE_ONE,
+                t.rect.width() * SCALE_ONE, t.rect.height() * SCALE_ONE,
+                t.edge == EDGE_LEFT, focused, 0, 0, attr,
+                Int(dock_kind_of_panel(t.kind)) * 1000 + t.idx, title,
+            ))
+            return
+        var x = t.rect.a.x
+        painter.set(canvas, x, t.rect.a.y, Cell(String("─"), attr, 1))
+        painter.set(canvas, x, t.rect.b.y - 1, Cell(String("─"), attr, 1))
+        var y = t.rect.a.y + 1
+        for cp in title.codepoints():
+            if y >= t.rect.b.y - 1:
+                break
+            var w = char_width(Int(cp))
+            if w > t.rect.width():
+                continue
+            painter.set(canvas, x, y, Cell(String(cp), attr, w))
+            y += 1
+        if dock.attention_unseen > 0 and t.rect.width() > 1:
+            painter.set(
+                canvas, x + 1, t.rect.a.y + 1,
+                Cell(String("•"), Attr(LIGHT_YELLOW, PANE_BG), 1),
+            )
+
+    def _panel_focused(self, kind: Int, idx: Int) -> Bool:
+        if kind == PANEL_KIND_TERMINAL:
+            return self.terminal_panes[idx].focused
+        if kind == PANEL_KIND_DEBUG:
+            return self.debug_pane.focused
+        if kind == PANEL_KIND_FIND_RESULTS:
+            return self.find_results_pane.focused
+        return self.test_pane.focused
+
+    def _dock_edges_mouse(mut self, event: Event, screen: Rect) -> Bool:
+        """The project window's docked edges take ``event``: a divider
+        against the workspace (and its drag), a splitter inside a top,
+        left or right stack (and its drag), a side strip's tab, or a
+        right-click on a pane's header. True when it was theirs."""
+        if self.dock_split_left.handle_mouse(event):
+            if self.dock_split_left.take_changed():
+                self.config.dock_left_cols = self.dock_split_left.fixed_cells
+                self._persist_config()
+            return True
+        if self.dock_split_right.handle_mouse(event):
+            if self.dock_split_right.take_changed():
+                self.config.dock_right_cols = self.dock_split_right.fixed_cells
+                self._persist_config()
+            return True
+        if self.dock_split_top.handle_mouse(event):
+            if self.dock_split_top.take_changed():
+                self.config.dock_top_rows = self.dock_split_top.fixed_cells
+                self._persist_config()
+            return True
+        var layout = self._dock_layout(screen)
+        for e in [EDGE_TOP, EDGE_LEFT, EDGE_RIGHT]:
+            var area = layout.area(e)
+            if area.is_empty():
+                continue
+            var es = self._edge_slots(e, area, screen)
+            if self._panels_drive_resize(event, es, area):
+                return True
+        if not event.pressed or event.motion:
+            return False
+        var tabs = self._strip_tabs(screen)
+        for ref t in tabs:
+            if not t.rect.contains(event.pos):
+                continue
+            if event.button == MOUSE_BUTTON_LEFT:
+                self._reveal_panel(t.kind, t.idx, focus=True)
+            elif event.button == MOUSE_BUTTON_RIGHT:
+                self._open_dock_menu(t.kind, t.idx, event.pos)
+            return True
+        # A press anywhere else in a strip is the strip's, not the
+        # workspace's behind it.
+        if (layout.left_strip and layout.left.contains(event.pos)) \
+                or (layout.right_strip and layout.right.contains(event.pos)):
+            return True
+        if event.button == MOUSE_BUTTON_RIGHT:
+            return self._dock_header_menu(self._dock_slots(screen), event)
+        return False
+
+    def _dock_header_menu(mut self, slots: List[PanelSlot], event: Event) -> Bool:
+        """A right-click on a pane's header opens its dock menu."""
+        if event.button != MOUSE_BUTTON_RIGHT or not event.pressed \
+                or event.motion:
+            return False
+        for ref s in slots:
+            if s.rect.is_empty():
+                continue
+            ref dock = self._panel_dock(s.kind, s.idx)
+            if s.rect.contains(event.pos) \
+                    and event.pos.y < s.rect.a.y + dock.header_rows():
+                self._open_dock_menu(s.kind, s.idx, event.pos)
+                return True
+        return False
+
+    def _open_dock_menu(mut self, kind: Int, idx: Int, anchor: Point):
+        """The dock menu for panel ``(kind, idx)``: the edges it can move
+        to (the one it's on greyed), floating (in the native app) and
+        auto-hide. Answered by ``_on_dock_menu_submit``."""
+        self._dock_menu_kind = dock_kind_of_panel(kind)
+        self._dock_menu_idx = idx
+        self._file_op_path = String("")
+        self.tab_context_menu.open(anchor, self._dock_menu_items(kind, idx))
+
+    def _dock_menu_items(self, kind: Int, idx: Int) -> List[NativeMenuItem]:
+        ref dock = self._panel_dock(kind, idx)
+        var items = List[NativeMenuItem]()
+        items.append(NativeMenuItem(
+            String("Dock Left"), _DOCK_MENU_LEFT, dock.edge != EDGE_LEFT,
+            dock_edge_icon(EDGE_LEFT),
+        ))
+        items.append(NativeMenuItem(
+            String("Dock Right"), _DOCK_MENU_RIGHT, dock.edge != EDGE_RIGHT,
+            dock_edge_icon(EDGE_RIGHT),
+        ))
+        items.append(NativeMenuItem(
+            String("Dock Top"), _DOCK_MENU_TOP, dock.edge != EDGE_TOP,
+            dock_edge_icon(EDGE_TOP),
+        ))
+        items.append(NativeMenuItem(
+            String("Dock Bottom"), _DOCK_MENU_BOTTOM, dock.edge != EDGE_BOTTOM,
+            dock_edge_icon(EDGE_BOTTOM),
+        ))
+        if self.host_owns_menu:
+            items.append(NativeMenuItem(
+                String("Float"), _DOCK_MENU_FLOAT, dock.edge != EDGE_FLOAT,
+                dock_edge_icon(EDGE_FLOAT),
+            ))
+        items.append(NativeMenuItem.separator())
+        items.append(NativeMenuItem(
+            String("Stop Auto-hiding") if dock.auto_hide
+                else String("Auto-hide"),
+            _DOCK_MENU_AUTO_HIDE, dock.edge != EDGE_FLOAT,
+            String(DOCK_AUTO_HIDE_ICON),
+        ))
+        return items^
+
+    def _on_dock_menu_submit(mut self, act: Int):
+        """Answer the dock menu ``_open_dock_menu`` opened."""
+        var kind = panel_kind_of_dock(self._dock_menu_kind)
+        var idx = self._dock_menu_idx
+        self._dock_menu_kind = DOCK_NONE
+        if kind < 0 or not self._panel_visible(kind, idx):
+            return
+        if act == _DOCK_MENU_AUTO_HIDE:
+            self._toggle_auto_hide(kind, idx)
+        elif act == _DOCK_MENU_LEFT:
+            self._dock_panel(kind, idx, EDGE_LEFT)
+        elif act == _DOCK_MENU_RIGHT:
+            self._dock_panel(kind, idx, EDGE_RIGHT)
+        elif act == _DOCK_MENU_TOP:
+            self._dock_panel(kind, idx, EDGE_TOP)
+        elif act == _DOCK_MENU_BOTTOM:
+            self._dock_panel(kind, idx, EDGE_BOTTOM)
+        elif act == _DOCK_MENU_FLOAT:
+            self._dock_panel(kind, idx, EDGE_FLOAT)
+
+    def _menu_panel(self) -> Tuple[Int, Int]:
+        """The panel the View menu's Dock items act on: the focused tool
+        pane, else the last one focused while it's still open;
+        ``(-1, 0)`` when there's none."""
+        var t = self.key_target()
+        if t.is_tool_pane():
+            return (panel_kind_of_dock(t.kind), t.idx)
+        var kind = panel_kind_of_dock(self._last_pane_kind)
+        if kind >= 0 and self._panel_visible(kind, self._last_pane_idx):
+            return (kind, self._last_pane_idx)
+        return (-1, 0)
+
+    def dock_menu_state(self) -> Tuple[Int, Bool]:
+        """For the View menu's checkmarks: the edge of the panel its Dock
+        items act on (-1 when there's none) and whether it auto-hides."""
+        var mp = self._menu_panel()
+        if mp[0] < 0:
+            return (-1, False)
+        ref dock = self._panel_dock(mp[0], mp[1])
+        return (Int(dock.edge), dock.auto_hide)
+
+    def _dock_panel(mut self, kind: Int, idx: Int, edge: UInt8):
+        """Move panel ``(kind, idx)`` to ``edge`` and focus it; its kind
+        docks there from now on. Floating asks the host for the panel
+        window when there isn't one (``panels_float_request``)."""
+        var was_floating = self._panel_dock(kind, idx).edge == EDGE_FLOAT \
+            and self.float_allowed
+        self._panel_dock(kind, idx).set_edge(edge)
+        self._record_dock_default(kind, idx)
+        self._focus_dock(dock_kind_of_panel(kind), idx)
+        if edge == EDGE_FLOAT:
+            if not self.float_allowed:
+                self.panels_float_request = True
+            self.panel_focus_request = True
+        elif was_floating:
+            self.panels_window_key = False
+            self.main_focus_request = True
+
+    def _toggle_auto_hide(mut self, kind: Int, idx: Int):
+        ref dock = self._panel_dock(kind, idx)
+        dock.auto_hide = not dock.auto_hide
+        if not dock.auto_hide:
+            _ = dock.unhide()
+        self._record_dock_default(kind, idx)
+
+    def _record_dock_default(mut self, kind: Int, idx: Int):
+        """A panel's edge and auto-hide become its kind's: where the next
+        one opens, and where this one opens next session."""
+        ref dock = self._panel_dock(kind, idx)
+        var spec = dock_spec(dock.edge, dock.home_edge)
+        var auto = dock.auto_hide
+        if kind == PANEL_KIND_TERMINAL:
+            self.config.dock_terminal = spec^
+            self.config.auto_hide_terminal = auto
+        elif kind == PANEL_KIND_DEBUG:
+            self.config.dock_debug = spec^
+            self.config.auto_hide_debug = auto
+        elif kind == PANEL_KIND_FIND_RESULTS:
+            self.config.dock_find_results = spec^
+            self.config.auto_hide_find_results = auto
+        else:
+            self.config.dock_test = spec^
+            self.config.auto_hide_test = auto
+        self._persist_config()
+
+    def _adopt_dock_default(mut self, kind: Int, idx: Int):
+        """Dock panel ``(kind, idx)`` where its kind docks (the config)."""
+        var spec: String
+        var auto: Bool
+        if kind == PANEL_KIND_TERMINAL:
+            spec = self.config.dock_terminal
+            auto = self.config.auto_hide_terminal
+        elif kind == PANEL_KIND_DEBUG:
+            spec = self.config.dock_debug
+            auto = self.config.auto_hide_debug
+        elif kind == PANEL_KIND_FIND_RESULTS:
+            spec = self.config.dock_find_results
+            auto = self.config.auto_hide_find_results
+        else:
+            spec = self.config.dock_test
+            auto = self.config.auto_hide_test
+        ref dock = self._panel_dock(kind, idx)
+        dock.edge = dock_spec_edge(spec)
+        dock.home_edge = dock_spec_home(spec)
+        dock.auto_hide = auto
+
+    def _adopt_dock_defaults(mut self):
+        """Every open panel docks where its kind docks — after the config
+        is loaded."""
+        self._adopt_dock_default(PANEL_KIND_DEBUG, 0)
+        self._adopt_dock_default(PANEL_KIND_TEST, 0)
+        self._adopt_dock_default(PANEL_KIND_FIND_RESULTS, 0)
+        for i in range(len(self.terminal_panes)):
+            self._adopt_dock_default(PANEL_KIND_TERMINAL, i)
+
+    def float_all_panels(mut self, on: Bool):
+        """Every panel floats (``on``) or docks back to its home edge, and
+        their kinds with them; ``on`` also allows floating. The old
+        all-or-nothing Floating panels switch, for scripts and tests."""
+        if on:
+            self.float_allowed = True
+        var panels = List[Tuple[Int, Int]]()
+        for i in range(len(self.terminal_panes)):
+            panels.append((PANEL_KIND_TERMINAL, i))
+        panels.append((PANEL_KIND_DEBUG, 0))
+        panels.append((PANEL_KIND_FIND_RESULTS, 0))
+        panels.append((PANEL_KIND_TEST, 0))
+        for p in panels:
+            ref dock = self._panel_dock(p[0], p[1])
+            if on:
+                dock.set_edge(EDGE_FLOAT)
+            elif dock.edge == EDGE_FLOAT:
+                dock.set_edge(dock.home_edge)
+            self._record_dock_default(p[0], p[1])
+
+    def dock_floating_panels_home(mut self):
+        """The floating panels' window was closed: its panels dock to
+        their home edges (and their kinds with them)."""
+        var panels = self._visible_panels()
+        for ref p in panels:
+            if p.edge == EDGE_FLOAT:
+                ref dock = self._panel_dock(p.kind, p.idx)
+                dock.set_edge(dock.home_edge)
+                self._record_dock_default(p.kind, p.idx)
+        self.panels_window_key = False
+
+    def take_panels_float_request(mut self) -> Bool:
+        """One-shot: a panel was just floated while the host has no panel
+        window for this Desktop; the host opens one (and allows floating,
+        ``float_allowed``)."""
+        var r = self.panels_float_request
+        self.panels_float_request = False
+        return r
+
+    def _reveal_panel(mut self, kind: Int, idx: Int, focus: Bool):
+        """Bring panel ``(kind, idx)`` out: back from auto-hide, or, rolled
+        up into a side strip, open. With ``focus`` it gets the keyboard
+        too (which is what puts an auto-hidden panel back on its own)."""
+        if kind < 0 or not self._panel_visible(kind, idx):
+            return
+        var edge = self._panel_edge(kind, idx)
+        ref dock = self._panel_dock(kind, idx)
+        if not dock.unhide() and dock.is_minimized():
+            if edge == EDGE_LEFT or edge == EDGE_RIGHT:
+                dock.set_state(PANEL_STATE_NORMAL)
+        if focus:
+            self._focus_dock(dock_kind_of_panel(kind), idx)
+
+    def _auto_hide_panels(mut self):
+        """Roll up every open, unfocused auto-hide panel on a docked edge:
+        an editor has the focus. Floating ones stay — the editor doesn't
+        cover their window."""
+        var panels = self._visible_panels()
+        for ref p in panels:
+            if p.edge == EDGE_FLOAT or self._panel_focused(p.kind, p.idx):
+                continue
+            ref dock = self._panel_dock(p.kind, p.idx)
+            if dock.auto_hide and not dock.resizing:
+                _ = dock.auto_hide_now()
 
     def panels_framed(self, screen: Rect) -> Bool:
         """The floating panels' window wears a Turbo Vision frame of cells
@@ -3659,8 +4460,8 @@ struct Desktop(Movable):
     def paint_panels(mut self, mut canvas: Canvas, screen: Rect):
         """Paint the tool panels to fill the host's separate panel window.
 
-        The companion to the main-surface `paint` when `panels_detached` is
-        set. Lays the visible panels out via `_panel_window_slots`; when none
+        The companion to the main-surface `paint` for the panels whose
+        edge is `EDGE_FLOAT`. Lays the visible panels out via `_panel_window_slots`; when none
         are open it paints the background plus a one-line hint."""
         self._sync_host_chrome()
         self._coalesce_dock_states()
@@ -3796,10 +4597,12 @@ struct Desktop(Movable):
         return -1
 
     def _panels_drive_resize(
-        mut self, event: Event, slots: List[PanelSlot], screen: Rect,
+        mut self, event: Event, slots: List[PanelSlot], area: Rect,
     ) -> Bool:
-        """Resize handling for the floating panel window. Returns True when
-        the event was consumed by a resize (started, dragged, or released).
+        """Resize handling for a filling stack (the floating panel window,
+        a docked top, left or right edge) laid out in ``area``. Returns
+        True when the event was consumed by a resize (started, dragged, or
+        released).
 
         Unlike the docked path (bottom-anchored, ``height = bottom -
         cursor``), the floating stack is top-anchored: a panel's top is
@@ -3818,9 +4621,7 @@ struct Desktop(Movable):
             if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
                 dock.resizing = False
                 return True
-            self._panels_drag_splitter(
-                slots, i, event.pos.y, self._panels_area(screen),
-            )
+            self._panels_drag_splitter(slots, i, event.pos.y, area)
             return True
         # A fresh press on a splitter starts resizing the panel above it.
         # Not a double click: that's the lower panel's header toggling
@@ -3956,21 +4757,25 @@ struct Desktop(Movable):
         opened is hidden under it and can't have it now (Copy went to that
         pane and copied nothing). The flags are left alone, so the pane
         has the keyboard again when the review ends."""
-        var in_panels = self.panels_detached and self.panels_window_key
+        var in_panels = self._keys_in_panels()
         if self.review.is_reviewing() and not in_panels:
             return KeyTarget(DOCK_NONE, 0)
-        if in_panels or not self.panels_detached:
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].focused \
-                        and self.terminal_panes[i].visible:
-                    return KeyTarget(DOCK_TERMINAL, i)
-            if self.debug_pane.focused and self.debug_pane.visible:
-                return KeyTarget(DOCK_DEBUG_PANE, 0)
-            if self.test_pane.focused and self.test_pane.visible:
-                return KeyTarget(DOCK_TEST_PANE, 0)
-            if self.find_results_pane.focused \
-                    and self.find_results_pane.visible:
-                return KeyTarget(DOCK_FIND_RESULTS_PANE, 0)
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].focused \
+                    and self.terminal_panes[i].visible \
+                    and self._is_floating(self.terminal_panes[i].dock) \
+                        == in_panels:
+                return KeyTarget(DOCK_TERMINAL, i)
+        if self.debug_pane.focused and self.debug_pane.visible \
+                and self._is_floating(self.debug_pane.dock) == in_panels:
+            return KeyTarget(DOCK_DEBUG_PANE, 0)
+        if self.test_pane.focused and self.test_pane.visible \
+                and self._is_floating(self.test_pane.dock) == in_panels:
+            return KeyTarget(DOCK_TEST_PANE, 0)
+        if self.find_results_pane.focused \
+                and self.find_results_pane.visible \
+                and self._is_floating(self.find_results_pane.dock) == in_panels:
+            return KeyTarget(DOCK_FIND_RESULTS_PANE, 0)
         if in_panels:
             return KeyTarget(KEYS_DROPPED, 0)
         if self.file_tree.focused and self.file_tree.visible:
@@ -4006,9 +4811,14 @@ struct Desktop(Movable):
             return Optional[String]()
         if not t.is_editor() and self._target_handle_key(t, event):
             return Optional[String]()
-        if self.panels_detached and self.panels_window_key:
+        if self._keys_in_panels():
             return Optional[String]()
         return self._handle_key(event, screen, to_editor=t.is_editor())
+
+    def _keys_in_panels(self) -> Bool:
+        """The keyboard is in the floating panels' window — which is only
+        on screen while some panel floats."""
+        return self.panels_window_key and self.panels_visible_count() > 0
 
     def handle_panels_event(
         mut self, event: Event, screen: Rect,
@@ -4026,7 +4836,9 @@ struct Desktop(Movable):
         # Resize drags get first dibs. The floating stack is top-anchored,
         # so a splitter resizes the panel above it (see _panels_drive_resize)
         # rather than the panel's own top border resizing itself.
-        if self._panels_drive_resize(event, slots, screen):
+        if self._panels_drive_resize(event, slots, self._panels_area(screen)):
+            return Optional[String]()
+        if self._dock_header_menu(slots, event):
             return Optional[String]()
         # A selection drag in flight is its pane's, over whichever panel
         # the pointer is now.
@@ -4109,6 +4921,30 @@ struct Desktop(Movable):
             return split
         return String("default")
 
+    def _dock_edges_shape(self, pos: Point, screen: Rect) -> String:
+        """The resize cursor over a docked edge's divider or a splitter in
+        its stack (or during either's drag), else empty."""
+        for shape in [
+            self.dock_split_left.pointer_shape(pos),
+            self.dock_split_right.pointer_shape(pos),
+            self.dock_split_top.pointer_shape(pos),
+        ]:
+            if len(shape.as_bytes()) > 0:
+                return shape
+        var layout = self._dock_layout(screen)
+        for e in [EDGE_TOP, EDGE_LEFT, EDGE_RIGHT]:
+            var area = layout.area(e)
+            if area.is_empty():
+                continue
+            var es = self._edge_slots(e, area, screen)
+            for ref s in es:
+                if not s.rect.is_empty() \
+                        and self._panel_dock(s.kind, s.idx).resizing:
+                    return String("ns-resize")
+            if self._panel_splitter_upper(es, pos) >= 0:
+                return String("ns-resize")
+        return String("")
+
     def _pane_split_shape(self, pos: Point) -> String:
         """The resize cursor of a split inside a tool pane, at ``pos``, or
         empty. The panes check their own visibility and layout."""
@@ -4186,8 +5022,13 @@ struct Desktop(Movable):
         var slots = self._dock_slots(screen)
         for ref s in slots:
             ref dock = self._panel_dock(s.kind, s.idx)
-            if dock.is_resizing() or dock.is_on_resize_edge(pos, s.rect):
+            if s.edge == EDGE_BOTTOM and (
+                dock.is_resizing() or dock.is_on_resize_edge(pos, s.rect)
+            ):
                 return String("ns-resize")
+        var edge_shape = self._dock_edges_shape(pos, screen)
+        if len(edge_shape.as_bytes()) > 0:
+            return edge_shape
         # A split inside a pane (the test results' list / detail).
         var split = self._pane_split_shape(pos)
         if len(split.as_bytes()) > 0:
@@ -5081,6 +5922,7 @@ struct Desktop(Movable):
         # to the actual pane width — see ``_bottom_pane_term_size``.
         self._last_screen = screen
         self._sync_host_chrome()
+        self._sync_dock_sizes()
         self._coalesce_dock_states()
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
@@ -5266,14 +6108,17 @@ struct Desktop(Movable):
         self.file_tree.set_modified_paths(modified_paths^)
         if not covered:
             self.file_tree.paint(canvas, screen)
-            # When floating, the tool panels render on the host's separate
-            # panel window (see `paint_panels`); the main surface skips them
-            # entirely.
-            if not self.panels_detached:
-                var slots = self._dock_slots(screen)
-                for ref s in slots:
-                    self._paint_slot(canvas, s)
-                self._paint_attention_flashes(canvas, screen, False)
+            # Floating panels render on the host's separate panel window
+            # (see `paint_panels`); the main surface paints the docked ones,
+            # the dividers of the docked edges and the side strips.
+            var slots = self._dock_slots(screen)
+            for ref s in slots:
+                # A panel rolled up into a side strip shows only its tab.
+                if s.rect.is_empty() and self._panel_visible(s.kind, s.idx):
+                    continue
+                self._paint_slot(canvas, s)
+            self._paint_dock_edges(canvas, screen)
+            self._paint_attention_flashes(canvas, screen, False)
             # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip
             # the in-grid paint so the top row stays clear for other content.
             if not self.host_owns_menu:
@@ -6558,6 +7403,8 @@ struct Desktop(Movable):
         self.active_theme = theme_by_name(self.config.theme)
         self.theme_version += 1
         self._rebuild_lsp_specs()
+        # Panels open where their kinds were docked last.
+        self._adopt_dock_defaults()
         # Refresh the project menu against the recents we just adopted —
         # both the entries ``__init__`` couldn't populate (the empty
         # default config had no recents) and any project another window
@@ -7572,6 +8419,9 @@ struct Desktop(Movable):
             pane.open()
             pane.focused = False
             self.terminal_panes.append(pane^)
+            self._adopt_dock_default(
+                PANEL_KIND_TERMINAL, len(self.terminal_panes) - 1,
+            )
 
     def _detach_tmux_panes(mut self):
         """Drop the panes attached to tmux sessions, leaving the sessions
@@ -8654,7 +9504,7 @@ struct Desktop(Movable):
         # the debug pane's bottom rows, and the debug pane's top
         # border sits over the workspace where ``windows.handle_mouse``
         # would otherwise grab clicks.
-        if event.kind == EVENT_MOUSE and not self.panels_detached:
+        if event.kind == EVENT_MOUSE:
             var press = event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion
             var slots = self._dock_slots(screen)
@@ -8662,14 +9512,21 @@ struct Desktop(Movable):
                 ref dock = self._panel_dock(s.kind, s.idx)
                 # A selection drag in a pty pane is that pane's too,
                 # wherever the pointer went: past its top edge is how the
-                # selection scrolls on.
-                if dock.is_resizing() or (
-                    press and dock.is_on_resize_edge(event.pos, s.rect)
+                # selection scrolls on. Only the bottom stack's panes size
+                # themselves by their header.
+                var bottom = s.edge == EDGE_BOTTOM
+                if (bottom and dock.is_resizing()) or (
+                    bottom and press and dock.is_on_resize_edge(event.pos, s.rect)
                 ) or (not press and self._panel_selecting(s.kind, s.idx)):
                     if self._panel_slot_handle_mouse(
-                        s.kind, s.idx, event, s.rect, allow_resize=True,
+                        s.kind, s.idx, event, s.rect, allow_resize=bottom,
                     ):
                         return Optional[String]()
+            # The docked edges: their dividers against the workspace, the
+            # splitters inside their stacks, the side strips' tabs, and a
+            # right-click on a pane's header (its dock menu).
+            if self._dock_edges_mouse(event, screen):
+                return Optional[String]()
         if event.kind == EVENT_MOUSE:
             if self.file_tree.is_resizing() \
                     or (event.button == MOUSE_BUTTON_LEFT \
@@ -8756,7 +9613,8 @@ struct Desktop(Movable):
         var pane_slots = self._surface_slots(screen, False)
         for ref s in pane_slots:
             if self._panel_slot_handle_mouse(
-                s.kind, s.idx, event, s.rect, allow_resize=True,
+                s.kind, s.idx, event, s.rect,
+                allow_resize=s.edge == EDGE_BOTTOM,
             ):
                 return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
@@ -8783,6 +9641,9 @@ struct Desktop(Movable):
         if clicked_window and event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
             self._focus_dock(DOCK_NONE)
+            # Even an editor that already had the focus: a panel a run
+            # brought out goes back on the next click into the code.
+            self._auto_hide_panels()
         # A click on the per-line bar in the git-changes gutter stamps a
         # ``pending_git_revert`` on the focused editor — surface the popup
         # before the next paint so it lands on this same frame.
@@ -10128,10 +10989,10 @@ struct Desktop(Movable):
         return self.native_ui() or self.platinum_ui()
 
     def native_panes_shown(self) -> Bool:
-        """Docked panes get host headers — not while floating (the panel
-        window has its own, `native_panels_shown`) or while a full-screen
-        tool covers the docks."""
-        return self.host_pane_headers() and not self.panels_detached \
+        """Docked panes get host headers — not while a full-screen tool
+        covers the docks. (Floating ones get theirs in the panel window,
+        `native_panels_shown`.)"""
+        return self.host_pane_headers() \
             and not self._fullscreen_modal_active() \
             and not self.history.active and not self.merge_view.active \
             and not self.review.active
@@ -10141,17 +11002,23 @@ struct Desktop(Movable):
         macOS look, the debug pane's native tables). Nothing on the main
         surface covers that window, so no modal or full-screen tool
         switches them off."""
-        return self.host_pane_headers() and self.panels_detached
+        return self.host_pane_headers()
 
     def _sync_host_chrome(mut self):
-        var on = self.native_panes_shown() or self.native_panels_shown()
+        var docked = self.native_panes_shown()
+        var floating = self.native_panels_shown()
         for i in range(len(self.terminal_panes)):
-            self.terminal_panes[i].dock.host_chrome = on
+            self.terminal_panes[i].dock.host_chrome = floating \
+                if self._is_floating(self.terminal_panes[i].dock) else docked
+        var on = floating if self._is_floating(self.debug_pane.dock) \
+            else docked
         self.debug_pane.dock.host_chrome = on
         # The Mac OS 9 look keeps the stack and variables on the grid.
         self.debug_pane.host_inspect = on and self.native_ui()
-        self.test_pane.dock.host_chrome = on
-        self.find_results_pane.dock.host_chrome = on
+        self.test_pane.dock.host_chrome = floating \
+            if self._is_floating(self.test_pane.dock) else docked
+        self.find_results_pane.dock.host_chrome = floating \
+            if self._is_floating(self.find_results_pane.dock) else docked
 
     def native_pane_act(
         mut self, kind: UInt8, idx: Int, op: Int, var command_id: String,
@@ -10902,6 +11769,24 @@ struct Desktop(Movable):
             self.config.tab_bar = not self.config.tab_bar
             self._view_config_changed()
             return Optional[String]()
+        if action.startswith("view:dock_"):
+            var mp = self._menu_panel()
+            if mp[0] < 0:
+                self._say(String("No tool panel to dock"))
+                return Optional[String]()
+            if action == VIEW_DOCK_AUTO_HIDE:
+                self._toggle_auto_hide(mp[0], mp[1])
+            elif action == VIEW_DOCK_LEFT:
+                self._dock_panel(mp[0], mp[1], EDGE_LEFT)
+            elif action == VIEW_DOCK_RIGHT:
+                self._dock_panel(mp[0], mp[1], EDGE_RIGHT)
+            elif action == VIEW_DOCK_TOP:
+                self._dock_panel(mp[0], mp[1], EDGE_TOP)
+            elif action == VIEW_DOCK_BOTTOM:
+                self._dock_panel(mp[0], mp[1], EDGE_BOTTOM)
+            elif action == VIEW_DOCK_FLOAT:
+                self._dock_panel(mp[0], mp[1], EDGE_FLOAT)
+            return Optional[String]()
         if (
             action == VIEW_CLASSIC_UI or action == VIEW_NATIVE_UI
             or action == VIEW_PLATINUM_UI
@@ -11065,7 +11950,7 @@ struct Desktop(Movable):
             if self.key_target().is_tool_pane():
                 _ = self._request_focused_pane_close()
                 return Optional[String]()
-            if self.panels_detached and self.panels_window_key:
+            if self._keys_in_panels():
                 return Optional[String]()
             self._close_window_keeping_work(self.windows.focused)
             return Optional[String]()
@@ -13206,6 +14091,12 @@ struct Desktop(Movable):
         stack — all panes drop their ``focused`` flag. ``idx`` is
         only consulted for ``DOCK_TERMINAL`` (which terminal pane in
         the stack)."""
+        var pk = panel_kind_of_dock(kind)
+        if pk >= 0 and self._panel_visible(pk, idx):
+            self._last_pane_kind = kind
+            self._last_pane_idx = idx
+            # Focusing an auto-hidden pane brings it back.
+            _ = self._panel_dock(pk, idx).unhide()
         self.file_tree.focused = kind == DOCK_FILE_TREE
         self.debug_pane.focused = kind == DOCK_DEBUG_PANE
         self.test_pane.focused = kind == DOCK_TEST_PANE
@@ -13244,18 +14135,22 @@ struct Desktop(Movable):
 
         The file tree always lives in the main window. The tool panels
         (terminal / debug / test) only count while docked: when
-        ``panels_detached`` they render on a separate host window, so a
+        ``EDGE_FLOAT`` they render on a separate host window, so a
         focused floating pane must not dim the main editor — that's a
         cross-window focus shift the host tracks via ``host_focused``."""
         if self.file_tree.focused:
             return True
-        if not self.panels_detached:
-            if self.debug_pane.focused or self.test_pane.focused \
-                    or self.find_results_pane.focused:
+        if self.debug_pane.focused and not self._is_floating(self.debug_pane.dock):
+            return True
+        if self.test_pane.focused and not self._is_floating(self.test_pane.dock):
+            return True
+        if self.find_results_pane.focused \
+                and not self._is_floating(self.find_results_pane.dock):
+            return True
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].focused \
+                    and not self._is_floating(self.terminal_panes[i].dock):
                 return True
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].focused:
-                    return True
         return False
 
     def _editor_keyboard_live(self) -> Bool:
@@ -13318,6 +14213,9 @@ struct Desktop(Movable):
         pane.startup_command = startup_command
         pane.open()
         self.terminal_panes.append(pane^)
+        self._adopt_dock_default(
+            PANEL_KIND_TERMINAL, len(self.terminal_panes) - 1,
+        )
         self._focus_dock(DOCK_TERMINAL, len(self.terminal_panes) - 1)
         # When the panels float on the host's own window, in-process
         # focus isn't enough — ask the host to make that window key so
@@ -13862,6 +14760,8 @@ struct Desktop(Movable):
             self.settings.cfg.native_ui = self.config.native_ui
             self.settings.cfg.platinum_ui = self.config.platinum_ui
             self.settings.cfg.theme = self.config.theme
+            # The dock menus move panels (and their kinds) meanwhile.
+            _copy_dock_settings(self.settings.cfg, self.config)
             if len(self.settings._font_names) > 0:
                 self.settings.font_choice = self.font_label()
                 self.settings.cfg.font_size = self.config.font_size
@@ -13885,6 +14785,13 @@ struct Desktop(Movable):
             self.config.cursor_blink = self.settings.cfg.cursor_blink
             # Only new panes see it; running ones keep their transport.
             self.config.terminal_tmux = self.settings.cfg.terminal_tmux
+            # Where each kind of panel docks: the open ones move too.
+            var docks_moved = _dock_settings_differ(
+                self.settings.cfg, self.config,
+            )
+            _copy_dock_settings(self.config, self.settings.cfg)
+            if docks_moved:
+                self._adopt_dock_defaults()
             # The look (macOS-style UI or classic), the same as View ▸
             # macOS-style UI.
             if self.settings.cfg.native_ui != self.config.native_ui \
@@ -14092,8 +14999,10 @@ struct Desktop(Movable):
         self.debug_pane.clear_all()
         self.debug_pane.visible = True
         # Surface the floating panel window on this (re)start — orderFront,
-        # not focus (the host keeps keyboard focus in the editor).
+        # not focus (the host keeps keyboard focus in the editor) — and an
+        # auto-hidden pane.
         self.panel_front_request = True
+        self._reveal_panel(PANEL_KIND_DEBUG, 0, focus=False)
         var where = self._target_program(target)
         var cwd = where[0]
         var program = where[1]
@@ -14142,6 +15051,9 @@ struct Desktop(Movable):
             )
             pane.tmux_project = root
             self.terminal_panes.append(pane^)
+            self._adopt_dock_default(
+                PANEL_KIND_TERMINAL, len(self.terminal_panes) - 1,
+            )
             idx = len(self.terminal_panes) - 1
         self._launch_tmux_pane(
             idx, where[0], shell_command(where[1], target.args),
@@ -14164,6 +15076,7 @@ struct Desktop(Movable):
             self.terminal_panes[idx].open()
             self.terminal_panes[idx].focused = False
         self.panel_front_request = True
+        self._reveal_panel(PANEL_KIND_TERMINAL, idx, focus=False)
         self._say(message)
 
     def _active_target(mut self, label: String) -> Optional[RunTarget]:
@@ -14310,8 +15223,10 @@ struct Desktop(Movable):
         self._test_output_held = False
         self.test_pane.visible = True
         # Surface the floating panel window on this test (re)run — orderFront,
-        # not focus (the host keeps keyboard focus in the editor).
+        # not focus (the host keeps keyboard focus in the editor) — and an
+        # auto-hidden pane.
         self.panel_front_request = True
+        self._reveal_panel(PANEL_KIND_TEST, 0, focus=False)
         try:
             self.test_pane.run(
                 program, args, project_root,
@@ -14348,6 +15263,9 @@ struct Desktop(Movable):
             )
             pane.tmux_project = root
             self.terminal_panes.append(pane^)
+            self._adopt_dock_default(
+                PANEL_KIND_TERMINAL, len(self.terminal_panes) - 1,
+            )
             idx = len(self.terminal_panes) - 1
         # Live results: the run reports into the session's file (see
         # ``test_report.mojo``), through the session's environment.
@@ -14801,6 +15719,12 @@ struct Desktop(Movable):
         aren't saved; transient (review) windows count as no path at all,
         so they neither enter the recents nor get saved.
         """
+        # Keyboard focus moving to the editors rolls auto-hide panels up.
+        var kk = self.key_target().kind
+        if kk != self._last_key_kind:
+            self._last_key_kind = kk
+            if kk == DOCK_NONE:
+                self._auto_hide_panels()
         var idx = self._focused_editor_idx()
         if idx != self._focus_idx or (
             idx >= 0
@@ -16538,6 +17462,7 @@ struct Desktop(Movable):
         _ = self._echo_dap_spawn_line()
         self.debug_pane.visible = True
         self.panel_front_request = True
+        self._reveal_panel(PANEL_KIND_DEBUG, 0, focus=False)
 
     def _reset_debug_slot(mut self):
         """Free the single run/debug slot for a new debug session: stop
@@ -17399,6 +18324,9 @@ struct Desktop(Movable):
         and file-tree rows (which may have no open window)."""
         var act = self.tab_context_menu.action
         self.tab_context_menu.close()
+        if self._dock_menu_kind != DOCK_NONE:
+            self._on_dock_menu_submit(act)
+            return Optional[String]()
         var path = self._file_op_path
         if len(path.as_bytes()) == 0:
             return Optional[String]()
@@ -19569,6 +20497,31 @@ def _pane_dock_act(mut dock: BottomDockedPanel, op: Int, var command_id: String)
         )
     elif op == 4:
         dock.pending_command_id = command_id^
+
+
+def _dock_settings_differ(a: TurbokodConfig, b: TurbokodConfig) -> Bool:
+    """Whether ``a`` docks a kind of panel elsewhere than ``b`` does, or
+    auto-hides it differently (the cut order aside)."""
+    return a.dock_terminal != b.dock_terminal or a.dock_debug != b.dock_debug \
+        or a.dock_test != b.dock_test \
+        or a.dock_find_results != b.dock_find_results \
+        or a.auto_hide_terminal != b.auto_hide_terminal \
+        or a.auto_hide_debug != b.auto_hide_debug \
+        or a.auto_hide_test != b.auto_hide_test \
+        or a.auto_hide_find_results != b.auto_hide_find_results
+
+
+def _copy_dock_settings(mut to: TurbokodConfig, src: TurbokodConfig):
+    """Settings ▸ Panels' fields of ``src`` into ``to``."""
+    to.dock_terminal = src.dock_terminal
+    to.dock_debug = src.dock_debug
+    to.dock_test = src.dock_test
+    to.dock_find_results = src.dock_find_results
+    to.auto_hide_terminal = src.auto_hide_terminal
+    to.auto_hide_debug = src.auto_hide_debug
+    to.auto_hide_test = src.auto_hide_test
+    to.auto_hide_find_results = src.auto_hide_find_results
+    to.dock_order = src.dock_order
 
 
 def _sync_test_splits(

@@ -294,6 +294,27 @@ struct TurbokodConfig(Copyable, Movable):
     # (``test_split_tall``). Dragged in the pane; double click resets.
     var test_split_wide: Int
     var test_split_tall: Int
+    # Where each kind of tool panel docks (``dock_spec`` in window.mojo:
+    # ``bottom`` / ``top`` / ``left`` / ``right``, or ``float:<edge>`` —
+    # the floating panels' window, docking to ``<edge>`` where there's
+    # none), and whether it auto-hides. A new panel of the kind starts
+    # there; moving one moves the kind. See docs/dock-edges.md.
+    var dock_terminal: String
+    var dock_debug: String
+    var dock_test: String
+    var dock_find_results: String
+    var auto_hide_terminal: Bool
+    var auto_hide_debug: Bool
+    var auto_hide_test: Bool
+    var auto_hide_find_results: Bool
+    # The docked side columns' widths and the top region's height, in
+    # cells. Dragged at their divider; double click resets.
+    var dock_left_cols: Int
+    var dock_right_cols: Int
+    var dock_top_rows: Int
+    # The order the docked edges cut the window in, first first: the edges'
+    # names, comma-separated (``dock_order_edges``). Settings ▸ Panels.
+    var dock_order: String
     # Settings ▸ Language Server. Per-feature gates for the optional,
     # non-user-initiated LSP capabilities. Each only takes effect when the
     # active server also advertises the matching provider. Mixed defaults:
@@ -391,6 +412,18 @@ struct TurbokodConfig(Copyable, Movable):
         self.test_results_view = False
         self.test_split_wide = 400
         self.test_split_tall = 400
+        self.dock_terminal = String("bottom")
+        self.dock_debug = String("bottom")
+        self.dock_test = String("bottom")
+        self.dock_find_results = String("bottom")
+        self.auto_hide_terminal = False
+        self.auto_hide_debug = False
+        self.auto_hide_test = False
+        self.auto_hide_find_results = False
+        self.dock_left_cols = DOCK_SIDE_COLS
+        self.dock_right_cols = DOCK_SIDE_COLS
+        self.dock_top_rows = DOCK_TOP_ROWS
+        self.dock_order = String("left,right,top,bottom")
         self.lsp_format_on_save = False
         self.lsp_signature_help = True
         self.lsp_document_highlight = True
@@ -552,6 +585,36 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
     cfg.test_split_tall = _split_fraction(json_get_int(
         root, String("test_split_tall"), cfg.test_split_tall,
     ))
+    cfg.dock_terminal = json_get_string(
+        root, String("dock_terminal"), cfg.dock_terminal,
+    )
+    cfg.dock_debug = json_get_string(root, String("dock_debug"), cfg.dock_debug)
+    cfg.dock_test = json_get_string(root, String("dock_test"), cfg.dock_test)
+    cfg.dock_find_results = json_get_string(
+        root, String("dock_find_results"), cfg.dock_find_results,
+    )
+    cfg.auto_hide_terminal = json_get_bool(
+        root, String("auto_hide_terminal"), cfg.auto_hide_terminal,
+    )
+    cfg.auto_hide_debug = json_get_bool(
+        root, String("auto_hide_debug"), cfg.auto_hide_debug,
+    )
+    cfg.auto_hide_test = json_get_bool(
+        root, String("auto_hide_test"), cfg.auto_hide_test,
+    )
+    cfg.auto_hide_find_results = json_get_bool(
+        root, String("auto_hide_find_results"), cfg.auto_hide_find_results,
+    )
+    cfg.dock_left_cols = _dock_size(json_get_int(
+        root, String("dock_left_cols"), cfg.dock_left_cols,
+    ))
+    cfg.dock_right_cols = _dock_size(json_get_int(
+        root, String("dock_right_cols"), cfg.dock_right_cols,
+    ))
+    cfg.dock_top_rows = _dock_size(json_get_int(
+        root, String("dock_top_rows"), cfg.dock_top_rows,
+    ))
+    cfg.dock_order = json_get_string(root, String("dock_order"), cfg.dock_order)
     cfg.lsp_format_on_save = json_get_bool(
         root, String("lsp_format_on_save"), cfg.lsp_format_on_save,
     )
@@ -748,6 +811,23 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     root.put(String("test_results_view"), json_bool(config.test_results_view))
     root.put(String("test_split_wide"), json_int(config.test_split_wide))
     root.put(String("test_split_tall"), json_int(config.test_split_tall))
+    root.put(String("dock_terminal"), json_str(config.dock_terminal))
+    root.put(String("dock_debug"), json_str(config.dock_debug))
+    root.put(String("dock_test"), json_str(config.dock_test))
+    root.put(String("dock_find_results"), json_str(config.dock_find_results))
+    root.put(
+        String("auto_hide_terminal"), json_bool(config.auto_hide_terminal),
+    )
+    root.put(String("auto_hide_debug"), json_bool(config.auto_hide_debug))
+    root.put(String("auto_hide_test"), json_bool(config.auto_hide_test))
+    root.put(
+        String("auto_hide_find_results"),
+        json_bool(config.auto_hide_find_results),
+    )
+    root.put(String("dock_left_cols"), json_int(config.dock_left_cols))
+    root.put(String("dock_right_cols"), json_int(config.dock_right_cols))
+    root.put(String("dock_top_rows"), json_int(config.dock_top_rows))
+    root.put(String("dock_order"), json_str(config.dock_order))
     root.put(
         String("lsp_format_on_save"), json_bool(config.lsp_format_on_save),
     )
@@ -1039,6 +1119,17 @@ def save_config_merged(
     var ok = _write_config(merged)
     _release_config_lock(lock)
     return ConfigSave(ok, merged^)
+
+
+comptime DOCK_SIDE_COLS = 50
+"""A docked side column's width until the user drags it."""
+comptime DOCK_TOP_ROWS = 12
+"""The top dock region's height until the user drags it."""
+
+
+def _dock_size(v: Int) -> Int:
+    """A stored dock column width / region height, in cells."""
+    return max(4, min(1000, v))
 
 
 def _split_fraction(v: Int) -> Int:

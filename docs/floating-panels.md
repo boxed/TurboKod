@@ -1,9 +1,10 @@
 # Floating panels (native macOS)
 
-A per-project toggle that moves the **tool panels** (terminal panes, the
-run/debug pane, and the test pane) out of the main project window and into a
-**second native window** of their own. The file tree and editor windows stay in
-the main window, which reclaims the bottom rows the panels used to occupy.
+Floating is one of a tool panel's dock edges (see [dock-edges.md](dock-edges.md)):
+the panels whose edge is Floating — terminal panes, the run/debug pane, the
+test pane, Find Results, any mix of them — render in a **second native window**
+of their own. The other panels stay docked on their edges in the main window,
+whose workspace reclaims the rows the floating ones would have taken.
 
 This is a **Swift-frontend-only presentation feature**, in the same sense the
 [native menu](native-menu.md) is: the Mojo core gains a small, frontend-agnostic
@@ -34,25 +35,21 @@ Two surfaces, **one Desktop** is the right decomposition:
   panel window asks it to paint *only* the panels. Events from each window route
   to the matching half. This is the chosen design.
 
-So `Desktop` gains one flag, `panels_detached`, and a parallel
-paint/event entry point for the panel surface. When `panels_detached` is false
-(the only state the terminal frontend ever uses) nothing changes.
+So a panel's dock edge says where it goes, and `Desktop` gains one flag,
+`float_allowed` — the host has a panel window for it — plus a parallel
+paint/event entry point for the panel surface. While `float_allowed` is false
+(the only state the terminal frontend ever uses) a floating panel docks on its
+`home_edge` instead (`Desktop.effective_edge`).
 
 ## Mojo core changes
 
-`Desktop.panels_detached: Bool` (default `False`), set by the host via
-`tk_desktop_set_panels_detached`.
+`Desktop.float_allowed: Bool` (default `False`), set by the host via
+`tk_desktop_set_float_allowed` while it has the panel window.
 
-When `panels_detached` is **true**:
-
-- `workspace_rect` stops subtracting `_terminal_stack_height`,
-  `_debug_pane_height`, and `_test_pane_height` from the bottom — the editor
-  area grows to fill the freed rows. The status/tab strip (`_bottom_chrome_height`)
-  still belongs to the main window and is still reserved.
-- `Desktop.paint` skips the `terminal_panes` / `debug_pane` / `test_pane` paint
-  calls (the main grid no longer shows them).
-- Mouse hit-tests and the resize-edge checks for those panels are skipped on the
-  main surface (`handle_event`), since they're not painted there.
+The main surface lays out, paints and hit-tests only the panels whose
+effective edge isn't Floating (`_dock_slots`), so a floating one takes no
+room there; the panel surface has only the floating ones
+(`_panel_window_slots`).
 
 The panel surface gets its own entry points on `Desktop`:
 
@@ -65,8 +62,10 @@ The panel surface gets its own entry points on `Desktop`:
 ### Panel-window layout
 
 In the panel window there is no editor area, no file tree, and no status bar to
-work around — the panels own the whole grid. `_panel_window_slots(screen)`
-returns one `Rect` per visible panel in a fixed order:
+work around — the panels own the whole grid. `_panel_window_slots(screen)` is
+`_edge_slots(EDGE_FLOAT, …)`, the filling stack the docked top, left and right
+edges use too ([dock-edges.md](dock-edges.md)): one `Rect` per floating panel
+in a fixed order:
 
 ```
 terminal_panes[0]
@@ -165,11 +164,10 @@ restores a panel as a side effect:
 Both marks are set by the drag itself rather than read off `dock.resizing` in
 the next frame: a quick drag is over before a frame sees it.
 
-If **no** tool panels are visible, the host **orders the panel window out**
-(hides it) while leaving floating mode on — `panels_detached` stays true and the
-window object lives on in `panels[id]`, it's just not on screen. The moment a
-panel reopens (a terminal, the debug pane, the test pane) the window is ordered
-front again. This is driven by polling `tk_desktop_panels_visible_count` once per
+If **no** floating panels are open, the host **orders the panel window out**
+(hides it) — `float_allowed` stays true and the window object lives on in
+`panels[id]`, it's just not on screen. The moment a floating panel opens (or a
+panel is floated) the window is ordered front again. This is driven by polling `tk_desktop_panels_visible_count` once per
 tick: `count == 0` → `orderOut`, `count > 0` while hidden → `orderFront` (not
 `makeKey`, so reopening a panel doesn't yank focus off the editor). The
 toggle/restore paths skip the initial `orderFront` when the count is zero so an
@@ -241,26 +239,33 @@ and `showPanelWindow` runs both polls before the window first shows:
   drags the window, and the sides and bottom corners resize it in whole cells
   (`pointer_shape_panels` reports `ew-resize` there).
 
-### Menu surface
+### Choosing to float
 
-A new **View ▸ Floating panels** item, checkable, action
-`app.toggle_floating_panels`. Added in `app_menus.build_menus` (only with
-`native=True`, since only a windowing host can act on it) so the frontends share the definition (per the menu-surface rule in
-[native-menu.md](native-menu.md) — never hardcode NSMenu items in Swift). The
-checkmark mirrors `panels_detached`, synced each tick in
-`app_menus.refresh_menu_visibility`. The action is a **host action**: `dispatch_action`
-returns it unhandled, `_action_code` maps it to `ACT_TOGGLE_FLOATING_PANELS`,
-and Swift owns the actual window create/destroy and then calls
-`tk_desktop_set_panels_detached` to update the flag (and thus the checkmark).
+Floating is a panel's choice, made like any other dock edge: View ▸ Float
+Panel (the focused or last focused pane), Float in a pane header's dock menu,
+or Settings ▸ Panels for a kind (all in [dock-edges.md](dock-edges.md); Float
+is offered only where the host owns the menu, i.e. in the native app). The
+panel's kind floats from then on.
 
-The terminal frontend doesn't surface a floating toggle; the item is harmless
-there (it would just be a no-op host action), but to keep the in-grid menu
-honest the item is only added when the host owns the menu.
+When a panel is floated while the host has no panel window for the Desktop,
+the core raises `panels_float_request` — window request bit 16
+(`tk_desktop_take_window_requests`). The host's `openPanelWindow` then
+creates the window at the frame saved for this display configuration (or the
+default beside the project window), allows floating, and records `floating`
+for the configuration. Closing the panel window (its close button, or the
+close box of its Platinum / Turbo Vision frame) docks its panels on their home
+edges — `tk_desktop_dock_floating_home`, which moves their kinds too — and
+tears the window down.
+
+There used to be one all-or-nothing View ▸ Floating panels switch
+(`ACT_TOGGLE_FLOATING_PANELS`, code 7, now reserved); `Desktop.float_all_panels`
+keeps its effect for scripts and tests.
 
 ## C ABI additions (`native_api.mojo` + `turbokod.h`)
 
 ```c
-void    tk_desktop_set_panels_detached(int64_t h, int64_t on);
+void    tk_desktop_set_float_allowed(int64_t h, int64_t on);
+void    tk_desktop_dock_floating_home(int64_t h);
 // The panel window is the key window (per tick): its Turbo Vision frame's
 // lines are double then.
 void    tk_desktop_set_panels_focused(int64_t h, int64_t on);
@@ -295,7 +300,7 @@ the panes' rows in this window, and `tk_desktop_debug_inspect` takes a
 `panels` flag. The host polls both for the panel view before its occlusion
 check, so they stay in step while the window is covered.
 
-New action code: `ACT_TOGGLE_FLOATING_PANELS = 7`.
+`tk_desktop_panels_visible_count` counts the panels open in the panel window.
 
 `tk_desktop_tick` already runs all the per-frame housekeeping (LSP/DAP/terminal
 ticks) for the whole Desktop, so the panel window does **not** run its own tick —
@@ -371,10 +376,11 @@ screen-parameter change while it's open:
 3. If `configs[K]` exists **and** `floating == true` **and** the panel frame is
    visible on the current screens → enter floating mode: size the main window to
    `configs[K].main`, create/show the panel window at `configs[K].panel`, and
-   call `tk_desktop_set_panels_detached(h, 1)`.
+   call `tk_desktop_set_float_allowed(h, 1)`.
 4. Otherwise → **docked**: size the main window to `configs[K].main` if present
    else `last` else default; ensure the panel window is closed and
-   `panels_detached` is 0.
+   floating is not allowed (`float_allowed` 0): the floating panels dock on
+   their home edges, still floating by choice.
 
 So the requested roaming behavior falls straight out of step 3 → 4:
 
@@ -405,8 +411,8 @@ isn't visibility-checked).
 
 | Concern | Location |
 | --- | --- |
-| `panels_detached` flag, `paint_panels`, `handle_panels_event`, panel-window layout, View menu item | `src/turbokod/desktop.mojo` |
-| `_panels` C ABI, `ACT_TOGGLE_FLOATING_PANELS`, menu-checkmark sync | `src/turbokod/native_api.mojo` |
+| `float_allowed` flag, `paint_panels`, `handle_panels_event`, panel-window layout, the dock menus | `src/turbokod/desktop.mojo` |
+| `_panels` C ABI, `tk_desktop_set_float_allowed`, `tk_desktop_dock_floating_home`, the float request bit | `src/turbokod/native_api.mojo` |
 | C ABI declarations | `app/swift/turbokod.h` |
 | Display-config key, config-keyed `native_window.json`, screen-change observer, panel `NSWindow` + `PanelCellView`, toggle/restore/fallback logic | `app/swift/TurboKod.swift` |
 

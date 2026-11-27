@@ -137,6 +137,37 @@ def test_split_leaves_its_divider_to_a_host_that_draws_chrome() raises:
     assert_equal(plain.get(5, 1).glyph, String("│"))
 
 
+def test_split_fixed_cells_keeps_its_size_as_the_area_grows() raises:
+    # A second half fixed at 20 cells: the first takes the rest, at any width.
+    var s = SplitArea(min_first=5, min_second=5, fixed_cells=20, fixed_second=True)
+    var h = s.layout(Rect(0, 0, 81, 5), True)
+    assert_equal(h[1].width(), 20)
+    assert_equal(h[0].width(), 60)
+    h = s.layout(Rect(0, 0, 121, 5), True)
+    assert_equal(h[1].width(), 20)
+    # A first half fixed at 8 rows, stacked.
+    var t = SplitArea(fixed_cells=8)
+    var v = t.layout(Rect(0, 1, 40, 31), False)
+    _same(v[0], Rect(0, 1, 40, 9))
+    _same(v[1], Rect(0, 10, 40, 31))
+
+
+def test_split_fixed_cells_drag_writes_cells_and_double_click_resets() raises:
+    var s = SplitArea(min_first=5, min_second=5, fixed_cells=20, fixed_second=True)
+    _ = s.layout(Rect(0, 0, 81, 5), True)
+    assert_equal(s.divider_rect().a.x, 60)
+    assert_true(s.handle_mouse(_press(60, 2)))
+    assert_true(s.handle_mouse(_drag(50, 2)))
+    assert_true(s.handle_mouse(_release(50, 2)))
+    assert_true(s.take_changed())
+    assert_equal(s.fixed_cells, 30)
+    var h = s.layout(Rect(0, 0, 101, 5), True)
+    assert_equal(h[1].width(), 30)
+    assert_true(s.handle_mouse(_press(70, 2, clicks=2)))
+    assert_true(s.take_changed())
+    assert_equal(s.fixed_cells, 20)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

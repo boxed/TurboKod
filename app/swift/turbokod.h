@@ -302,13 +302,18 @@ int64_t tk_desktop_attention_flashes(int64_t h, int64_t panels, int64_t cols, in
 
 // Drain the one-shot window requests in `mask` (bits: 1 make the floating
 // panel window key, 2 orderFront it without makeKey, 4 makeKeyAndOrderFront
-// the main window, 8 raise the git window); returns those that were set.
+// the main window, 8 raise the git window, 16 open a floating panels' window
+// — a panel was just floated while there's none); returns those that were set.
 int32_t tk_desktop_take_window_requests(int64_t h, int64_t mask);
 
-// Floating panels (native macOS) — see docs/floating-panels.md. The tool
-// panels render on a separate host window via the _panels entry points; the
-// main window keeps using the functions above.
-void    tk_desktop_set_panels_detached(int64_t h, int64_t on);
+// Floating panels (native macOS) — see docs/floating-panels.md and
+// docs/dock-edges.md. Panels whose dock edge is Floating render on a separate
+// host window via the _panels entry points while the host allows it (it has
+// that window); the main window keeps using the functions above.
+void    tk_desktop_set_float_allowed(int64_t h, int64_t on);
+// The panel window was closed: its panels dock to their home edges.
+void    tk_desktop_dock_floating_home(int64_t h);
+// Panels open in the floating panels' window.
 int64_t tk_desktop_panels_visible_count(int64_t h);
 // The host's other cell windows, by HOST_SURFACE_* code: the floating panels
 // (1), Settings (2), the dialog window (3), the git window (4).

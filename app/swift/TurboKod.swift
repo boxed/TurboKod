@@ -638,6 +638,7 @@ enum WindowRequest {
     static let panelFront: Int32 = 2
     static let mainFocus: Int32 = 4
     static let gitFront: Int32 = 8
+    static let panelsFloat: Int32 = 16
 }
 
 enum SharedLsp {
@@ -3313,7 +3314,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 tk_desktop_set_panels_focused(v.handle, (panelWin != nil && panelWin === keyWin) ? 1 : 0)
                 let req = tk_desktop_take_window_requests(
                     v.handle, Int64(WindowRequest.panelFocus | WindowRequest.panelFront
-                        | WindowRequest.mainFocus))
+                        | WindowRequest.mainFocus | WindowRequest.panelsFloat))
+                // A panel was just floated and this project has no panel
+                // window: open one (before the focus request below, which
+                // the same float raised, so that can make it key).
+                if req & WindowRequest.panelsFloat != 0 {
+                    openPanelWindow(v); changed = true
+                }
                 // The user just explicitly opened a new terminal pane. When the
                 // tool panels float on their own window, in-process focus isn't
                 // enough — make that window key so the shell is typeable without
@@ -3595,12 +3602,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // debug:toggle_bp just registered.
     private func invokeCaptureActions(_ actions: [String], then done: @escaping () -> Void) {
         guard let action = actions.first, let v = views.first else { done(); return }
-        if action == "app.toggle_floating_panels" {
-            toggleFloatingPanels(v)   // a host action: the core only reports it
-        } else {
-            _ = withUTF8Arg(action) { ptr, len in
-                tk_desktop_menu_invoke(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
-            }
+        _ = withUTF8Arg(action) { ptr, len in
+            tk_desktop_menu_invoke(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
         }
         v.needsDisplay = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -4258,7 +4261,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case openProject = 4   // ACT_OPEN_PROJECT
         case newWindow   = 5   // ACT_NEW_WINDOW (also Project ▸ recent)
         case closeWindow = 6   // ACT_CLOSE_WINDOW (Close project)
-        case toggleFloatingPanels = 7  // ACT_TOGGLE_FLOATING_PANELS
+        // 7 was ACT_TOGGLE_FLOATING_PANELS: floating is a panel's dock
+        // edge now (the core's View ▸ Float Panel), reserved.
         case toggleFloatingGit = 8     // ACT_TOGGLE_FLOATING_GIT
     }
 
@@ -4306,13 +4310,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // it (same path as the red close button). The Project menu only
             // offers this when a project is open, so `view` is its window.
             if let v = view { closeWindow(v) }
-        case .toggleFloatingPanels:
-            // Resolve to the project window's view: the menu can fire while
-            // the panel window is key, in which case `view` is the `.panels`
-            // view and its `mainPeer` is the project window.
-            if let v = view {
-                toggleFloatingPanels(v.surface == .panels ? (v.mainPeer ?? v) : v)
-            }
         case .toggleFloatingGit:
             if let v = view { toggleFloatingGit(v.surface == .panels ? (v.mainPeer ?? v) : v) }
         }
@@ -4622,11 +4619,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // not segfaulting. `windowWillClose` is intentionally not implemented;
     // returning false here means it never fires.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Closing a panel window just docks the panels — the Desktop lives on
-        // the project window, which stays open. (Re-open via View ▸ Floating
-        // panels.)
+        // Closing a panel window docks its panels on their home edges — the
+        // Desktop lives on the project window, which stays open. (Floating
+        // one again, View ▸ Float Panel, reopens it.)
         if let entry = panels.first(where: { $0.value.window === sender }) {
-            if let mv = mainViewByObjectId(entry.key) { closePanelWindow(for: mv) }
+            if let mv = mainViewByObjectId(entry.key) {
+                tk_desktop_dock_floating_home(mv.handle)
+                closePanelWindow(for: mv)
+            }
             return false
         }
         // Closing a dialog window (Settings, Project Settings) via the red
@@ -5079,8 +5079,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return false
     }
 
-    // Open (or reposition) the panel window for a project window and flip the
-    // Desktop into detached mode.
+    // Open (or reposition) the panel window for a project window and let its
+    // Desktop float panels there (the panels whose dock edge is Floating).
     private func showPanelWindow(for mainView: CellView, frame: NSRect?) {
         guard let mainWin = mainView.window else { return }
         let id = ObjectIdentifier(mainView)
@@ -5103,7 +5103,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         if let f = frame { win.setFrame(f, display: false) }
         fitWindowToScreen(win, fallback: mainWin.screen)
-        tk_desktop_set_panels_detached(mainView.handle, 1)
+        tk_desktop_set_float_allowed(mainView.handle, 1)
         // In its look's frame before it shows, not a tick after.
         _ = pollTVPanelChrome(win, pv)
         _ = pollPlatinumPanelChrome(win, pv)
@@ -5119,36 +5119,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         pv.redraw()
     }
 
-    // Tear the panel window down and re-dock the panels.
+    // Tear the panel window down. Its floating panels dock on their home
+    // edges while it's gone (they keep floating as their choice: a display
+    // configuration that has the window again shows them there).
     private func closePanelWindow(for mainView: CellView, save: Bool = true) {
         let id = ObjectIdentifier(mainView)
         guard let pair = panels[id] else {
-            tk_desktop_set_panels_detached(mainView.handle, 0)
+            tk_desktop_set_float_allowed(mainView.handle, 0)
             return
         }
         panels.removeValue(forKey: id)
         dropOverlays(for: pair.view)
         pair.view.handle = 0          // shared handle is owned by the main view
-        tk_desktop_set_panels_detached(mainView.handle, 0)
+        tk_desktop_set_float_allowed(mainView.handle, 0)
         pair.window.orderOut(nil)     // see windowShouldClose (Sequoia teardown)
         mainView.redraw()
         if save && !isTerminating { saveGeometryFor(mainView) }
     }
 
-    // View ▸ Floating panels — flip the current project window between docked
-    // and floating, persisting the new choice under the current display config.
-    func toggleFloatingPanels(_ mainView: CellView) {
-        let id = ObjectIdentifier(mainView)
-        if panels[id] != nil {
-            closePanelWindow(for: mainView)
-        } else {
-            // Reuse the saved panel frame for this config if any.
-            let saved = mainView.project.flatMap {
-                loadProjectGeometry($0).configs[displayConfigKey()]?.panel
-            }
-            showPanelWindow(for: mainView, frame: saved)
-            saveGeometryFor(mainView)
+    // A panel was floated (View ▸ Float Panel, a pane's dock menu) while the
+    // project had no panel window: open one at the frame saved for this
+    // display configuration, if any, and record that it floats here.
+    func openPanelWindow(_ mainView: CellView) {
+        if panels[ObjectIdentifier(mainView)] != nil { return }
+        let saved = mainView.project.flatMap {
+            loadProjectGeometry($0).configs[displayConfigKey()]?.panel
         }
+        showPanelWindow(for: mainView, frame: saved)
+        saveGeometryFor(mainView)
     }
 
     // View ▸ Floating git window — the git window's dock box from the menu.
@@ -5392,17 +5390,21 @@ extension AppController {
         }
         if pollTestHosts(v, tests, platinum: platinum) { changed = true }
         let barItems = list.enumerated().filter {
-            ["split", "vscroll", "hscroll"].contains($0.element["kind"] as? String ?? "")
+            ["split", "vscroll", "hscroll", "dock_tab"].contains($0.element["kind"] as? String ?? "")
+        }
+        func family(_ kind: String) -> String {
+            kind == "split" || kind == "dock_tab" ? kind : "bar"
         }
         if reconcileViews(&current, barItems, key: { e in
-            "\(platinum ? "p" : "n"):\(e.element["kind"] as? String == "split" ? "split" : "bar"):\(e.offset)"
+            "\(platinum ? "p" : "n"):\(family(e.element["kind"] as? String ?? "")):\(e.offset)"
         }, make: { e in
             let h: HostItemView
-            switch (platinum, e.element["kind"] as? String != "split") {
-            case (true, true): h = PlatinumHostScrollBar()
-            case (true, false): h = PlatinumSplitDivider()
-            case (false, true): h = HostScrollBar()
-            case (false, false): h = SplitDivider()
+            switch (platinum, family(e.element["kind"] as? String ?? "")) {
+            case (_, "dock_tab"): h = DockTab(platinum: platinum)
+            case (true, "bar"): h = PlatinumHostScrollBar()
+            case (true, _): h = PlatinumSplitDivider()
+            case (false, "bar"): h = HostScrollBar()
+            default: h = SplitDivider()
             }
             v.addSubview(h)
             return h
@@ -7349,7 +7351,16 @@ final class PopupMenu: NSObject {
             mi.target = self
             mi.tag = it["code"] as? Int ?? 0
             mi.isEnabled = it["enabled"] as? Bool ?? true
+            if let icon = it["icon"] as? String, !icon.isEmpty {
+                mi.image = AppController.menuIcon(icon)
+            }
             menu.addItem(mi)
+        }
+        // Line the titles up when some rows carry an icon (`menuIcon`).
+        if menu.items.contains(where: { $0.image != nil }) {
+            for mi in menu.items where !mi.isSeparatorItem && mi.image == nil {
+                mi.image = AppController.menuIcon("")
+            }
         }
     }
 
@@ -8920,6 +8931,80 @@ extension FileTreeOverlay: NSMenuDelegate {
 
 /// A few lines of code painted through a theme's editor and syntax slots
 /// (EDITOR_BG / EDITOR_FG = 16 / 17, SYN_* = 18…24) in a given font.
+/// The docked edges cutting a window in the order `order` (the config's
+/// `dock_order`: edge names, first first), each edge with a panel on it, the
+/// editors in what's left — the core's `dock_preview_regions`, drawn.
+final class DockPreview: NSView {
+    private let platinum: Bool
+    var order = "" { didSet { if order != oldValue { needsDisplay = true } } }
+
+    init(platinum: Bool) {
+        self.platinum = platinum
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+
+    /// The four edges in `spec`'s order, the missing ones after in the
+    /// default order (`dock_order_edges`).
+    static func edges(_ spec: String) -> [String] {
+        var out: [String] = []
+        for p in spec.split(separator: ",") {
+            let e = p.trimmingCharacters(in: .whitespaces)
+            if ["left", "right", "top", "bottom"].contains(e) && !out.contains(e) { out.append(e) }
+        }
+        for e in ["left", "right", "top", "bottom"] where !out.contains(e) { out.append(e) }
+        return out
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        var r = bounds
+        let side = floor(bounds.width / 4), band = floor(bounds.height / 4)
+        var regions: [(String, NSRect)] = []
+        for e in Self.edges(order) {
+            switch e {
+            case "left":
+                regions.append(("Left", NSRect(x: r.minX, y: r.minY, width: side, height: r.height)))
+                r = NSRect(x: r.minX + side, y: r.minY, width: r.width - side, height: r.height)
+            case "right":
+                regions.append(("Right", NSRect(x: r.maxX - side, y: r.minY, width: side, height: r.height)))
+                r = NSRect(x: r.minX, y: r.minY, width: r.width - side, height: r.height)
+            case "top":
+                regions.append(("Top", NSRect(x: r.minX, y: r.minY, width: r.width, height: band)))
+                r = NSRect(x: r.minX, y: r.minY + band, width: r.width, height: r.height - band)
+            default:
+                regions.append(("Bottom", NSRect(x: r.minX, y: r.maxY - band, width: r.width, height: band)))
+                r = NSRect(x: r.minX, y: r.minY, width: r.width, height: r.height - band)
+            }
+        }
+        regions.append(("Editor", r))
+        for (i, reg) in regions.enumerated() {
+            let editor = i == regions.count - 1
+            let box = reg.1.insetBy(dx: 1, dy: 1)
+            if platinum {
+                Platinum.fill(box, editor ? Platinum.light : Platinum.mid)
+                Platinum.bevel(box, Platinum.light, Platinum.shadow)
+                Platinum.text(reg.0, in: NSRect(x: box.minX, y: box.midY - 8, width: box.width, height: 16),
+                              center: true)
+            } else {
+                let path = NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3)
+                (editor ? NSColor.textBackgroundColor : NSColor.controlAccentColor.withAlphaComponent(0.22)).setFill()
+                path.fill()
+                NSColor.separatorColor.setStroke()
+                path.stroke()
+                let para = NSMutableParagraphStyle()
+                para.alignment = .center
+                let font = NSFont.systemFont(ofSize: 10)
+                let a = NSAttributedString(string: reg.0, attributes: [
+                    .font: font, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: para,
+                ])
+                let h = ceil(font.ascender - font.descender)
+                a.draw(in: NSRect(x: box.minX, y: box.midY - h / 2, width: box.width, height: h))
+            }
+        }
+    }
+}
+
 final class CodePreview: NSTextView {
     static let sizes = [0, 11, 12, 13, 14, 15, 16, 18, 20, 24]
 
@@ -10570,6 +10655,66 @@ final class PlatinumSplitDivider: HostItemBase {
     }
 }
 
+/// A tab of a side column rolled up into a strip (`Desktop._strip_tabs`):
+/// its panel's title running down it — bottom to top on the left edge, top
+/// to bottom on the right, as a book's spine reads — in the window's look.
+/// Draw-only: the core takes the click on the cells under it.
+final class DockTab: HostItemBase {
+    private let platinum: Bool
+    private var label = "", left = true, active = false
+
+    init(platinum: Bool) {
+        self.platinum = platinum
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func apply(_ o: [String: Any]) {
+        label = o["label"] as? String ?? ""
+        left = o["side"] as? Bool ?? true
+        active = o["active"] as? Bool ?? false
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds
+        if platinum {
+            Platinum.fill(r, active ? Platinum.face : Platinum.mid)
+            Platinum.fill(NSRect(x: r.minX, y: r.minY, width: r.width, height: 1), Platinum.dark)
+            Platinum.fill(NSRect(x: r.minX, y: r.maxY - 1, width: r.width, height: 1), Platinum.dark)
+            Platinum.bevel(r.insetBy(dx: 0, dy: 1), Platinum.light, Platinum.shadow)
+        } else {
+            NSColor.windowBackgroundColor.setFill()
+            r.fill()
+            let tab = NSBezierPath(roundedRect: r.insetBy(dx: 2, dy: 2), xRadius: 4, yRadius: 4)
+            (active ? NSColor.controlAccentColor.withAlphaComponent(0.25)
+                    : NSColor.quaternaryLabelColor).setFill()
+            tab.fill()
+        }
+        // The title along the tab: rotate about its center, then lay the
+        // text out across the tab's length.
+        NSGraphicsContext.saveGraphicsState()
+        let t = NSAffineTransform()
+        t.translateX(by: r.midX, yBy: r.midY)
+        t.rotate(byDegrees: left ? -90 : 90)
+        t.concat()
+        let along = NSRect(x: -r.height / 2 + 6, y: -r.width / 2, width: r.height - 12, height: r.width)
+        if platinum {
+            Platinum.text(label, in: along, center: true)
+        } else {
+            let para = NSMutableParagraphStyle()
+            para.alignment = .center
+            para.lineBreakMode = .byTruncatingTail
+            let font = NSFont.systemFont(ofSize: 11, weight: active ? .semibold : .regular)
+            let a = NSAttributedString(string: label, attributes: [
+                .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: para,
+            ])
+            let h = ceil(font.ascender - font.descender)
+            a.draw(in: NSRect(x: along.minX, y: along.midY - h / 2, width: along.width, height: h))
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
 /// A tool pane's host-drawn header: `PaneHeader` in the macOS look,
 /// `PlatinumPaneHeader` in the Mac OS 9 look.
 protocol PaneHeaderView: NSView {
@@ -11668,6 +11813,11 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             p.heightAnchor.constraint(equalToConstant: 150).isActive = true
             p.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
             out = p
+        case "dock_preview":
+            let p = DockPreview(platinum: false)
+            p.heightAnchor.constraint(equalToConstant: 130).isActive = true
+            p.widthAnchor.constraint(equalToConstant: 200).isActive = true
+            out = p
         default:
             let sp = NSView()
             sp.setContentHuggingPriority(.defaultLow, for: .vertical)
@@ -11705,6 +11855,8 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             if let p = v as? NSPopUpButton { p.selectItem(at: n["n"] as? Int ?? 0); p.isEnabled = enabled }
         case "button":
             if let b = v as? NSButton { b.title = n["text"] as? String ?? ""; b.isEnabled = enabled }
+        case "dock_preview":
+            if let p = v as? DockPreview { p.order = n["value"] as? String ?? "" }
         case "preview":
             if let p = v as? CodePreview {
                 let pal = themePalette(view?.handle ?? 0)
@@ -12885,6 +13037,7 @@ class PNode: NSView {
         case "button": out = PButton()
         case "separator": out = PSeparator()
         case "preview": out = PPreview()
+        case "dock_preview": out = PDockPreview()
         case "icon": out = PIcon()
         case "textarea": out = PTextArea()
         case "list": out = PListView()
@@ -13405,6 +13558,25 @@ final class PPreview: PNode {
         preview.render(palette: pal, font: CodePreview.font(
             label: n["text"] as? String ?? "", size: n["n"] as? Int ?? 0,
             builtins: n["opts"] as? [String] ?? []))
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) { Platinum.well(bounds, active: Platinum.active(self)) }
+}
+
+/// Settings ▸ Panels' miniature of the docked edges' cut order, in the
+/// Mac OS 9 look: a `DockPreview` in a well.
+final class PDockPreview: PNode {
+    private let preview = DockPreview(platinum: true)
+    override func built() { addSubview(preview) }
+    override var outset: CGFloat { 1 }
+    override func fit() -> NSSize { NSSize(width: 200, height: 130) }
+    override func place(_ r: NSRect) {
+        super.place(r)
+        preview.frame = bounds.insetBy(dx: 2, dy: 2)
+    }
+    override func apply(_ n: [String: Any]) {
+        node = n
+        preview.order = n["value"] as? String ?? ""
         needsDisplay = true
     }
     override func draw(_ dirtyRect: NSRect) { Platinum.well(bounds, active: Platinum.active(self)) }

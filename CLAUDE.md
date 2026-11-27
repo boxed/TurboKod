@@ -133,16 +133,30 @@ on `_git_modal()` (`local_changes.active and not git_windowed()`) — don't test
 `local_changes.active` for "blocks input"; the terminal frontends keep the
 in-grid modal. Full details in [docs/native-ui.md](docs/native-ui.md).
 
+### Dock edges and auto-hide
+
+Each tool panel docks to an edge of its own (`BottomDockedPanel.edge`:
+bottom, top, left, right, or floating) and can auto-hide (rolls up when an
+editor gets the focus, back out when the panel does). `Desktop._dock_layout`
+cuts the edges off the window in `config.dock_order` (Settings ▸ Panels,
+with a preview); the bottom stack keeps its per-pane heights, the other
+edges are filling stacks (`_edge_slots`, the floating window's algorithm), and
+a rolled-up side column becomes a strip of vertical tabs. Walk `_dock_slots`
+for "every docked pane" — never assume a pane is at the bottom — and
+`effective_edge` for where a pane is. Full details in
+[docs/dock-edges.md](docs/dock-edges.md).
+
 ### Floating panels (native macOS)
 
-A per-project toggle (View ▸ Floating panels) floats the tool panels (terminal /
-debug / test) into a second native window, leaving editors + file tree in the
-main window. It's a Swift-only *presentation* feature like the native menu: the
-Mojo core keeps one `Desktop` and gains a `panels_detached` flag plus a parallel
-`paint_panels` / `handle_panels_event` surface; the terminal frontend never turns
-it on. Window geometry and the floating-vs-docked choice are remembered **per
-display configuration** (keyed by `CGDisplay` UUIDs + resolutions), so unplugging
-the external display the panels lived on falls back to docked automatically.
+Floating is a dock edge: panels whose edge is `EDGE_FLOAT` render in a second
+native window, leaving the rest in the main window. It's a Swift-only
+*presentation* surface like the native menu: the Mojo core keeps one `Desktop`
+with a parallel `paint_panels` / `handle_panels_event` surface, and the host
+says whether it has that window (`float_allowed`; without one a floating panel
+docks on its `home_edge`); the terminal frontend never floats. Window geometry
+and whether the window is open are remembered **per display configuration**
+(keyed by `CGDisplay` UUIDs + resolutions), so unplugging the external display
+the panels lived on docks them automatically.
 
 Full details in [docs/floating-panels.md](docs/floating-panels.md).
 
