@@ -60,6 +60,11 @@ comptime NEW_WINDOW = String("app.new_window")
 # window) and then calls ``tk_desktop_set_panels_detached`` to update the
 # Desktop flag that drives the View-menu checkmark. See docs/floating-panels.md.
 comptime TOGGLE_FLOATING_PANELS = String("app.toggle_floating_panels")
+# Host action: float the git view's window off the project window, or dock
+# it back over it (the same as its title bar's dock box). The host owns the
+# window and its remembered placement, and reports the result through
+# ``tk_desktop_set_git_docked``, which drives the View-menu checkmark.
+comptime TOGGLE_FLOATING_GIT = String("app.toggle_floating_git")
 
 
 def build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
@@ -172,6 +177,9 @@ def build_menus(mut d: Desktop, native: Bool):
         # window — needs a host that owns windows.
         v.append(MenuItem(
             String("Floating panels"), TOGGLE_FLOATING_PANELS, checkable=True,
+        ))
+        v.append(MenuItem(
+            String("Floating git window"), TOGGLE_FLOATING_GIT, checkable=True,
         ))
         # The three looks are one choice, so they get a section of their own.
         v.append(MenuItem.separator())
@@ -309,6 +317,7 @@ def refresh_menu_visibility(mut d: Desktop):
     # The Desktop owns the flag, the host owns the window; this is the one
     # per-tick place both are reachable for the native menu snapshot.
     d.menu_bar.set_item_checked(TOGGLE_FLOATING_PANELS, d.panels_detached)
+    d.menu_bar.set_item_checked(TOGGLE_FLOATING_GIT, not d.git_window_docked)
     var git_visible = is_editor
     if not git_visible and d.project:
         git_visible = True

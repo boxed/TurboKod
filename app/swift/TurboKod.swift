@@ -4259,6 +4259,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case newWindow   = 5   // ACT_NEW_WINDOW (also Project ▸ recent)
         case closeWindow = 6   // ACT_CLOSE_WINDOW (Close project)
         case toggleFloatingPanels = 7  // ACT_TOGGLE_FLOATING_PANELS
+        case toggleFloatingGit = 8     // ACT_TOGGLE_FLOATING_GIT
     }
 
     // Generalized action-code dispatch. The source `sourceHandle` is the
@@ -4312,6 +4313,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let v = view {
                 toggleFloatingPanels(v.surface == .panels ? (v.mainPeer ?? v) : v)
             }
+        case .toggleFloatingGit:
+            if let v = view { toggleFloatingGit(v.surface == .panels ? (v.mainPeer ?? v) : v) }
         }
     }
 
@@ -5148,6 +5151,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    // View ▸ Floating git window — the git window's dock box from the menu.
+    // Open, it floats or docks now (and comes forward, so the change shows);
+    // closed, the choice is remembered for the next time it opens.
+    func toggleFloatingGit(_ mainView: CellView) {
+        if let sheet = chromes[ObjectIdentifier(mainView)]?.gitSheet, let p = sheet.gitPlacement {
+            p.toggle()
+            sheet.raise()
+            return
+        }
+        guard let project = mainView.project else { return }
+        let docked = !savedGitDocked(project)
+        recordGitDocked(project, docked)
+        tk_desktop_set_git_docked(mainView.handle, docked ? 1 : 0)
+    }
+
     // MARK: standalone dialog windows (Settings, Project Settings)
 
     /// Open or close `v`'s dialog-surface windows (Settings) to match the
@@ -5251,6 +5269,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             mainWin.setFrame(m, display: true)
         }
         fitWindowToScreen(mainWin)
+        // The View ▸ Floating git window checkmark, before the git window
+        // has opened (once open, its placement reports changes itself).
+        tk_desktop_set_git_docked(mainView.handle, (entry?.gitDocked ?? true) ? 1 : 0)
         // Capture runs grab a single window — keep the panels docked so a
         // staged debug/terminal pane is actually in the shot, regardless of
         // the layout saved for this display config. Read-only: the saved
@@ -14542,8 +14563,15 @@ final class GitWindowPlacement {
         guard docked else { return schedule() }
         guard let parent = parent, parent.frame != win.frame else { return }
         syncing = true
+        defer { syncing = false }
+        // Moving a parent carries its child windows along, and the git
+        // window is its child: it would move a second time by the same
+        // amount, so every drag event doubled the offset and the pair
+        // ran off screen. Let go of it while the parent catches up.
+        let attached = win.parent === parent
+        if attached { parent.removeChildWindow(win) }
         parent.setFrame(win.frame, display: true)
-        syncing = false
+        if attached { parent.addChildWindow(win, ordered: .above) }
     }
 
     /// Docked, the git window follows the project window.

@@ -25,6 +25,7 @@ comptime ACT_OPEN_PROJECT           = Int32(4)
 comptime ACT_NEW_WINDOW             = Int32(5)
 comptime ACT_CLOSE_WINDOW           = Int32(6)
 comptime ACT_TOGGLE_FLOATING_PANELS = Int32(7)
+comptime ACT_TOGGLE_FLOATING_GIT    = Int32(8)
 
 # Pointer shapes reported by ``tk_desktop_pointer_shape``.
 comptime SHAPE_DEFAULT = Int32(0)

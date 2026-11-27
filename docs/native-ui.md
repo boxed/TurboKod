@@ -391,7 +391,14 @@ title bar floats it into a window of its own and back — a title-bar
 accessory button in the macOS look, the zoom box in the Mac OS 9 look, a
 `[▼]`/`[▲]` box where the zoom box sits in the Turbo Vision look (the core
 paints the glyph from `git_window_docked`, set by
-`tk_desktop_set_git_docked`; the host hit-tests it). Opening a file from a
+`tk_desktop_set_git_docked`; the host hit-tests it). View ▸ Floating git
+window does the same from the menu (`ACT_TOGGLE_FLOATING_GIT`), and with
+the view closed it flips the remembered choice; the host sets
+`git_window_docked` from that choice when it applies a project's geometry,
+so the checkmark is right before the window first opens. Syncing a move
+of the docked window to the project window detaches it while the parent
+moves: a parent carries its children along, so the git window would move
+twice and every drag event doubled the offset. Opening a file from a
 docked view steps it aside (hidden, since a child can't go behind its
 parent) until Git ▸ Local changes brings it back. The choice (`gitDocked`)
 and the floating frame (`git`) are remembered per project and per display

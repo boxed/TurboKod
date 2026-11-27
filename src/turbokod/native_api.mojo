@@ -75,11 +75,13 @@ from turbokod.posix import wall_clock_ms
 
 from turbokod.host_abi import (
     ACT_CLOSE_WINDOW, ACT_NEW_WINDOW, ACT_NONE, ACT_OPEN_FILE,
-    ACT_OPEN_PROJECT, ACT_QUICK_OPEN, ACT_QUIT, ACT_TOGGLE_FLOATING_PANELS,
+    ACT_OPEN_PROJECT, ACT_QUICK_OPEN, ACT_QUIT, ACT_TOGGLE_FLOATING_GIT,
+    ACT_TOGGLE_FLOATING_PANELS,
     pack_canvas, pack_cells, shape_code,
 )
 from turbokod.app_menus import (
-    build_menus, NEW_WINDOW, refresh_menu_visibility, TOGGLE_FLOATING_PANELS,
+    build_menus, NEW_WINDOW, refresh_menu_visibility, TOGGLE_FLOATING_GIT,
+    TOGGLE_FLOATING_PANELS,
 )
 
 
@@ -139,6 +141,7 @@ def _action_code(action: Optional[String]) -> Int32:
     if a == NEW_WINDOW:        return ACT_NEW_WINDOW
     if a == CLOSE_WINDOW:      return ACT_CLOSE_WINDOW
     if a == TOGGLE_FLOATING_PANELS: return ACT_TOGGLE_FLOATING_PANELS
+    if a == TOGGLE_FLOATING_GIT: return ACT_TOGGLE_FLOATING_GIT
     return ACT_NONE
 
 
